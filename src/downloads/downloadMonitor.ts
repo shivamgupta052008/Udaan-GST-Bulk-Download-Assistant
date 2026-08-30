@@ -137,6 +137,13 @@ export class DownloadMonitor {
     return Array.from(this.trackedDownloads.values());
   }
 
+  public async reset(): Promise<void> {
+    this.trackedDownloads.clear();
+    this.jobAssociations.clear();
+    await ExtensionStorage.clearDownloadAssociations();
+    Logger.info('[Download Monitor] Reset download tracking and associations');
+  }
+
   public subscribe(listener: DownloadEventListener): () => void {
     this.listeners.add(listener);
     return () => {

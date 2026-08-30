@@ -326,14 +326,7 @@ export class DownloadQueueManager {
           filename: simulatedFilename,
         });
 
-        // Wait for the simulated download to complete
-        await sleep(1500);
-
-        // Re-fetch updated status
-        const updatedJob = (await QueueStore.getQueue()).find((j) => j.id === job.id);
-        if (updatedJob && updatedJob.status === 'DOWNLOADED') {
-          Logger.info(`[Queue Success] Test Job ${job.id} reached DOWNLOADED state safely.`);
-        }
+        Logger.info(`[Queue] Test Job ${job.id} initiated simulated download (#${downloadId}). Awaiting completion...`);
       } else {
         // Milestone 4 — Multi-Return (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B) Live Portal Automation
         const adapter = getAdapterForReturnType(job.returnType);
@@ -419,18 +412,6 @@ export class DownloadQueueManager {
         }
 
         Logger.info(`[Queue] ${job.returnType} JSON download initiated on GST Portal. Awaiting Chrome download event...`);
-      }
-
-      // Clear activeJobId
-      await QueueStore.updateQueueState({ activeJobId: null });
-      await this.notifyState();
-
-      // Trigger next pending job sequentially if queue is still running
-      const finalState = await QueueStore.getQueueState();
-      if (finalState.isRunning && !finalState.isPaused) {
-        setTimeout(() => {
-          this.processNext();
-        }, 400);
       }
     } catch (err) {
       Logger.warn(`[Queue Execution Exception] Job ${job.id} failed with error: ${String(err)}`);

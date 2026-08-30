@@ -513,26 +513,31 @@ export async function runAcceptanceTestSuite(
     'ADP-01',
     'ADAPTERS',
     'Milestone 2 Return Adapters Placeholders & GSTR-2B Activation',
-    'Verifies GSTR-1, GSTR-2A, GSTR-3B remain safe placeholders while GSTR-2B is actively enabled',
+    'Verifies return adapters registration, interface contract and activation across all return types',
     async () => {
       const a1 = new GSTR1Adapter();
       const a2 = new GSTR2AAdapter();
       const a3 = new GSTR2BAdapter();
       const a4 = new GSTR3BAdapter();
 
-      let m1Err = '';
-      try {
-        await a1.navigateToPeriod('X', 'Y', 'Z');
-      } catch (e: unknown) {
-        m1Err = e instanceof Error ? e.message : String(e);
-      }
-
-      if (!m1Err.includes('Milestone 2')) {
-        throw new Error(`GSTR-1 adapter returned unexpected error: ${m1Err}`);
-      }
-
-      if (a2.returnType !== 'GSTR-2A' || a3.returnType !== 'GSTR-2B' || a4.returnType !== 'GSTR-3B') {
+      if (a1.returnType !== 'GSTR-1' || a2.returnType !== 'GSTR-2A' || a3.returnType !== 'GSTR-2B' || a4.returnType !== 'GSTR-3B') {
         throw new Error('Adapter return type mismatch');
+      }
+
+      // Verify all adapters satisfy the standard GSTReturnAdapter capability contract
+      for (const adapter of [a1, a2, a3, a4]) {
+        if (typeof adapter.canHandlePage !== 'function') {
+          throw new Error(`Adapter ${adapter.returnType} missing canHandlePage`);
+        }
+        if (typeof adapter.verifyGstinContext !== 'function') {
+          throw new Error(`Adapter ${adapter.returnType} missing verifyGstinContext`);
+        }
+        if (typeof adapter.selectFinancialYear !== 'function') {
+          throw new Error(`Adapter ${adapter.returnType} missing selectFinancialYear`);
+        }
+        if (typeof adapter.selectReturnPeriod !== 'function') {
+          throw new Error(`Adapter ${adapter.returnType} missing selectReturnPeriod`);
+        }
       }
 
       // Verify GSTR-2B adapter is initialized and active
@@ -2213,8 +2218,12 @@ export async function runAcceptanceTestSuite(
     'Multi-Return Sequential Queue Execution',
     'Verifies sequential queue execution with mixed return types (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B)',
     async () => {
+      // 1. Strict test isolation
       await QueueStore.clearAll();
+      await testDownloadMonitor.reset();
+      await QueueStore.updateQueueState({ activeJobId: null, isRunning: false, isPaused: false });
 
+      // 2. Add 4 test jobs
       const j1 = await QueueStore.addJob({
         gstin: '27AABCU9603R1ZM',
         financialYear: '2025-2026',
@@ -2247,17 +2256,36 @@ export async function runAcceptanceTestSuite(
         isTestJob: true,
       });
 
-      // Start queue
+      // 3. Start queue
       await testQueueManager.startQueue();
 
-      // Wait for sequential queue processing of all 4 jobs
-      await sleep(7500);
+      // 4. Deterministic polling: wait until all 4 jobs reach DOWNLOADED state (up to 18 seconds)
+      const startTime = Date.now();
+      const timeoutMs = 18000;
+      const targetIds = [j1.id, j2.id, j3.id, j4.id];
 
-      const jobs = await QueueStore.getQueue();
+      while (Date.now() - startTime < timeoutMs) {
+        const queue = await QueueStore.getQueue();
+        const allDownloaded = targetIds.every((id) => {
+          const item = queue.find((q) => q.id === id);
+          return item?.status === 'DOWNLOADED';
+        });
+
+        if (allDownloaded) {
+          break;
+        }
+        await sleep(250);
+      }
+
+      // 5. Final state assertions
+      const finalJobs = await QueueStore.getQueue();
       for (const j of [j1, j2, j3, j4]) {
-        const found = jobs.find((item) => item.id === j.id);
+        const found = finalJobs.find((item) => item.id === j.id);
         if (!found || found.status !== 'DOWNLOADED') {
           throw new Error(`Job ${j.returnType} (${j.id}) expected DOWNLOADED, got: ${found?.status}`);
+        }
+        if (!found.browserDownloadId || !found.filename) {
+          throw new Error(`Job ${j.returnType} (${j.id}) missing download metadata: dlId=${found?.browserDownloadId}, file=${found?.filename}`);
         }
       }
     }

@@ -146,6 +146,10 @@ export class ExtensionStorage {
     await this.saveDownloadAssociations(map);
   }
 
+  public static async clearDownloadAssociations(): Promise<void> {
+    await this.set(STORAGE_KEYS.DOWNLOAD_ASSOCIATIONS, {});
+  }
+
   // Logs Specific Helpers
   public static async getLogs(): Promise<LogEntry[]> {
     return this.get<LogEntry[]>(STORAGE_KEYS.LOGS, []);
