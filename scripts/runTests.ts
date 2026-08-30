@@ -1,3 +1,18 @@
+import { JSDOM } from 'jsdom';
+
+if (typeof (global as any).document === 'undefined') {
+  const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+    url: 'https://services.gst.gov.in/services/returns/gstr2b',
+  });
+  (global as any).window = dom.window;
+  (global as any).document = dom.window.document;
+  (global as any).HTMLElement = dom.window.HTMLElement;
+  (global as any).HTMLSelectElement = dom.window.HTMLSelectElement;
+  (global as any).HTMLAnchorElement = dom.window.HTMLAnchorElement;
+  (global as any).Event = dom.window.Event;
+  (global as any).CustomEvent = dom.window.CustomEvent;
+}
+
 import { runAcceptanceTestSuite } from '../src/testing/testSuite';
 
 async function main() {

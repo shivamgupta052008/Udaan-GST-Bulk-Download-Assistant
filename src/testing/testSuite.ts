@@ -1608,6 +1608,267 @@ export async function runAcceptanceTestSuite(
     }
   );
 
+  // 56. LOC-21: Real production job requires actual downloaded content
+  await executeTest(
+    'LOC-21',
+    'LOCAL_SYNC_M3',
+    'Real Job Rejects Missing Download Content',
+    'Verifies real production jobs (isTestJob: false) fail sync (SYNC_FAILED) and never fabricate synthetic data if actual downloaded content is unavailable',
+    async () => {
+      const realJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'September',
+        returnType: 'GSTR-2B',
+        isTestJob: false,
+      });
+
+      await QueueStore.updateJob(realJob.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR2B_27AABCU9603R1ZM_092025.json',
+        downloadContent: null,
+      });
+
+      const refreshed = (await QueueStore.getQueue()).find((j) => j.id === realJob.id)!;
+      const res = await testSyncEngine.syncJob(refreshed);
+      if (res.success) {
+        throw new Error('Real production job without downloadContent must NOT succeed sync');
+      }
+
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === realJob.id);
+      if (!updated || updated.syncStatus !== 'SYNC_FAILED') {
+        throw new Error(`Expected real job syncStatus to become SYNC_FAILED, got: ${updated?.syncStatus}`);
+      }
+      if (updated.status !== 'DOWNLOADED') {
+        throw new Error(`Expected real job status to remain DOWNLOADED, got: ${updated?.status}`);
+      }
+
+      const provider = testSyncEngine.getProvider();
+      const exists = await provider.fileExists(
+        ['27AABCU9603R1ZM_My Company', '2025-26', 'GSTR-2B'],
+        'GSTR-2B_September_2025-26.json'
+      );
+      if (exists) {
+        throw new Error('Synthetic file was incorrectly written for real production job missing download content');
+      }
+    }
+  );
+
+  // 57. LOC-22: Real JSON content preservation
+  await executeTest(
+    'LOC-22',
+    'LOCAL_SYNC_M3',
+    'Real GSTR-2B JSON Content Preservation',
+    'Verifies actual downloaded GSTR-2B JSON payload (B2B invoices, supplier CTINs, taxable amounts) is accurately preserved on local disk',
+    async () => {
+      const realGstr2bPayload = JSON.stringify({
+        gstin: '27AABCU9603R1ZM',
+        fp: '012026',
+        cur_gt: 450000.5,
+        b2b: [
+          {
+            ctin: '06AAAAA0000A1Z5',
+            cfs: 'Y',
+            inv: [
+              {
+                inum: 'INV/2026/0101',
+                idt: '15-01-2026',
+                val: 118000,
+                pos: '27',
+                rchrg: 'N',
+                inv_typ: 'R',
+                itc: { tx_i: 18000, tx_c: 0, tx_s: 0 },
+              },
+            ],
+          },
+        ],
+        b2ba: [],
+        cdnr: [],
+        cdnra: [],
+        isd: [],
+      });
+
+      const realJobWithContent = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'January',
+        returnType: 'GSTR-2B',
+        isTestJob: false,
+      });
+
+      await QueueStore.updateJob(realJobWithContent.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR2B_27AABCU9603R1ZM_012026.json',
+        downloadContent: realGstr2bPayload,
+      });
+
+      const refreshedJob = (await QueueStore.getQueue()).find((j) => j.id === realJobWithContent.id)!;
+      const syncRes = await testSyncEngine.syncJob(refreshedJob);
+
+      if (!syncRes.success) {
+        throw new Error(`Expected real job sync to succeed, failed with: ${syncRes.error}`);
+      }
+
+      const provider = testSyncEngine.getProvider();
+      const savedContent = await provider.readFile(
+        ['27AABCU9603R1ZM_My Company', '2025-26', 'GSTR-2B'],
+        'GSTR-2B_January_2025-26.json'
+      );
+
+      if (!savedContent) {
+        throw new Error('Saved GSTR-2B file could not be read from storage provider');
+      }
+
+      const parsed = JSON.parse(savedContent);
+      if (!parsed.b2b || parsed.b2b.length !== 1 || parsed.b2b[0].ctin !== '06AAAAA0000A1Z5') {
+        throw new Error('Real GSTR-2B B2B invoice data was corrupted or overwritten with empty arrays');
+      }
+      if (parsed.b2b[0].inv[0].inum !== 'INV/2026/0101' || parsed.b2b[0].inv[0].val !== 118000) {
+        throw new Error('Invoice number or value was not preserved');
+      }
+    }
+  );
+
+  // 58. LOC-23: Invalid HTML rejection
+  await executeTest(
+    'LOC-23',
+    'LOCAL_SYNC_M3',
+    'HTML & Login Page Rejection',
+    'Verifies downloaded HTML pages (e.g. portal login timeouts, redirects) are rejected with SYNC_FAILED and never saved as .json',
+    async () => {
+      const htmlJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'February',
+        returnType: 'GSTR-2B',
+        isTestJob: false,
+      });
+
+      await QueueStore.updateJob(htmlJob.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR2B_27AABCU9603R1ZM_022026.json',
+        downloadContent: '<!DOCTYPE html><html><head><title>GST Login Portal</title></head><body>Please login to continue</body></html>',
+      });
+
+      const refreshedHtmlJob = (await QueueStore.getQueue()).find((j) => j.id === htmlJob.id)!;
+      const res = await testSyncEngine.syncJob(refreshedHtmlJob);
+
+      if (res.success) {
+        throw new Error('Sync must reject HTML error/login page content');
+      }
+
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === htmlJob.id);
+      if (!updated || updated.syncStatus !== 'SYNC_FAILED') {
+        throw new Error(`Expected syncStatus to be SYNC_FAILED for HTML content, got: ${updated?.syncStatus}`);
+      }
+      if (updated.status !== 'DOWNLOADED') {
+        throw new Error(`Expected job status to remain DOWNLOADED, got: ${updated?.status}`);
+      }
+      if (!updated.syncError?.toLowerCase().includes('html')) {
+        throw new Error(`Expected syncError to mention HTML page, got: ${updated.syncError}`);
+      }
+
+      const provider = testSyncEngine.getProvider();
+      const exists = await provider.fileExists(
+        ['27AABCU9603R1ZM_My Company', '2025-26', 'GSTR-2B'],
+        'GSTR-2B_February_2025-26.json'
+      );
+      if (exists) {
+        throw new Error('HTML content was illegally written to local storage as .json');
+      }
+    }
+  );
+
+  // 59. LOC-24: Empty file rejection
+  await executeTest(
+    'LOC-24',
+    'LOCAL_SYNC_M3',
+    'Empty File Rejection',
+    'Verifies empty downloaded content (whitespace or zero-length) is rejected with SYNC_FAILED and never saved',
+    async () => {
+      const emptyJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'November',
+        returnType: 'GSTR-2B',
+        isTestJob: false,
+      });
+
+      await QueueStore.updateJob(emptyJob.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR2B_27AABCU9603R1ZM_112025.json',
+        downloadContent: '   ',
+      });
+
+      const refreshedEmptyJob = (await QueueStore.getQueue()).find((j) => j.id === emptyJob.id)!;
+      const res = await testSyncEngine.syncJob(refreshedEmptyJob);
+
+      if (res.success) {
+        throw new Error('Sync must reject empty downloaded file content');
+      }
+
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === emptyJob.id);
+      if (!updated || updated.syncStatus !== 'SYNC_FAILED') {
+        throw new Error(`Expected syncStatus to be SYNC_FAILED for empty content, got: ${updated?.syncStatus}`);
+      }
+      if (updated.status !== 'DOWNLOADED') {
+        throw new Error(`Expected job status to remain DOWNLOADED, got: ${updated?.status}`);
+      }
+
+      const provider = testSyncEngine.getProvider();
+      const exists = await provider.fileExists(
+        ['27AABCU9603R1ZM_My Company', '2025-26', 'GSTR-2B'],
+        'GSTR-2B_November_2025-26.json'
+      );
+      if (exists) {
+        throw new Error('Empty file was incorrectly written to local storage');
+      }
+    }
+  );
+
+  // 60. LOC-25: Test job synthetic behavior preservation
+  await executeTest(
+    'LOC-25',
+    'LOCAL_SYNC_M3',
+    'Test Job Synthetic Payload Preservation',
+    'Verifies test harness jobs (isTestJob: true) continue to generate deterministic test payloads for automated test suites',
+    async () => {
+      const testJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'December',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      await QueueStore.updateJob(testJob.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR2B_27AABCU9603R1ZM_122025.json',
+      });
+
+      const refreshedTestJob = (await QueueStore.getQueue()).find((j) => j.id === testJob.id)!;
+      const res = await testSyncEngine.syncJob(refreshedTestJob);
+
+      if (!res.success) {
+        throw new Error(`Expected test job sync to succeed, failed: ${res.error}`);
+      }
+
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === testJob.id);
+      if (!updated || updated.syncStatus !== 'SYNCED') {
+        throw new Error(`Expected test job syncStatus to be SYNCED, got: ${updated?.syncStatus}`);
+      }
+
+      const provider = testSyncEngine.getProvider();
+      const exists = await provider.fileExists(
+        ['27AABCU9603R1ZM_My Company', '2025-26', 'GSTR-2B'],
+        'GSTR-2B_December_2025-26.json'
+      );
+      if (!exists) {
+        throw new Error('Test job deterministic file was not created');
+      }
+    }
+  );
+
   return results;
 }
 

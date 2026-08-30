@@ -42,6 +42,7 @@ export interface QueueJob {
   localRelativePath?: string | null;
   syncedAt?: number | null;
   companyName?: string | null;
+  downloadContent?: string | null;
 }
 
 export interface QueueState {

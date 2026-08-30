@@ -193,27 +193,63 @@ export class SyncEngine {
       await provider.createDirectory([companyDir], fyDir);
       await provider.createDirectory([companyDir, fyDir], returnDir);
 
-      // 6. Construct standard GSTR-2B JSON payload content
-      const filePayload = JSON.stringify(
-        {
-          gstin: job.gstin,
-          fp: job.period,
-          fy: fyDir,
-          returnType: job.returnType,
-          downloadSource: 'GST_PORTAL_AUTOMATION',
-          jobId: job.id,
-          syncedAt: new Date().toISOString(),
-          data: {
-            b2b: [],
-            b2ba: [],
-            cdnr: [],
-            cdnra: [],
-            isd: [],
+      // 6. Resolve and Validate Actual Downloaded Content (Never fabricate production data)
+      let filePayload: string;
+
+      if (job.downloadContent !== undefined && job.downloadContent !== null) {
+        const raw = job.downloadContent.trim();
+        if (!raw) {
+          throw new Error('Downloaded file content is empty. Cannot synchronize empty file.');
+        }
+
+        // Validate that content is not an HTML login/error page
+        const isHtml =
+          raw.startsWith('<!DOCTYPE') ||
+          raw.startsWith('<html') ||
+          raw.includes('<html') ||
+          raw.includes('<body') ||
+          raw.includes('</html>');
+
+        if (isHtml) {
+          throw new Error('Downloaded content is an HTML web page / login redirect, not a valid GST JSON return.');
+        }
+
+        // Validate that content is valid JSON
+        try {
+          const parsed = JSON.parse(raw);
+          filePayload = JSON.stringify(parsed, null, 2);
+        } catch (jsonErr: any) {
+          throw new Error(`Downloaded content is not valid JSON: ${jsonErr?.message || String(jsonErr)}`);
+        }
+      } else if (job.isTestJob) {
+        // Safe exception strictly for test harnesses and synthetic test verification
+        filePayload = JSON.stringify(
+          {
+            gstin: job.gstin,
+            fp: job.period,
+            fy: fyDir,
+            returnType: job.returnType,
+            downloadSource: 'GST_PORTAL_AUTOMATION_TEST',
+            jobId: job.id,
+            syncedAt: new Date().toISOString(),
+            isTestJob: true,
+            data: {
+              b2b: [],
+              b2ba: [],
+              cdnr: [],
+              cdnra: [],
+              isd: [],
+            },
           },
-        },
-        null,
-        2
-      );
+          null,
+          2
+        );
+      } else {
+        // Real Production Job without actual downloaded content
+        throw new Error(
+          'Actual GSTR-2B downloaded content is unavailable. Real GST downloads cannot be synchronized without the original file content.'
+        );
+      }
 
       // 7. Write File
       const writeResult = await provider.writeFile(pathSegments, deterministicFileName, filePayload);
