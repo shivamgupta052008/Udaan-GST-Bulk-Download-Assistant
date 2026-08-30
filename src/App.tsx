@@ -45,7 +45,7 @@ export default function App() {
   // Acceptance Tests state
   const [testResults, setTestResults] = useState<TestCaseResult[]>([]);
   const [isRunningTests, setIsRunningTests] = useState(false);
-  const [testProgress, setTestProgress] = useState({ current: 0, total: 55 });
+  const [testProgress, setTestProgress] = useState({ current: 0, total: 75 });
 
   // Downloads simulator state
   const [simulatedDownloads, setSimulatedDownloads] = useState<
@@ -76,7 +76,7 @@ export default function App() {
   const handleRunTests = async () => {
     setIsRunningTests(true);
     setTestResults([]);
-    setTestProgress({ current: 0, total: 35 });
+    setTestProgress({ current: 0, total: 75 });
 
     const results = await runAcceptanceTestSuite((res, cur, tot) => {
       setTestResults((prev) => [...prev, res]);
@@ -115,7 +115,7 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'udaan-gst-bulk-download-extension-m2.zip';
+      a.download = 'udaan-gst-bulk-download-extension-m4.zip';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -145,7 +145,7 @@ export default function App() {
                 Udaan GST Bulk Download Assistant
               </h1>
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200/60">
-                Milestone 3 • Local Storage & Auto-Sync
+                Milestone 4 • Multi-Return (GSTR-1, 2A, 2B, 3B)
               </span>
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/60 flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5" />
@@ -153,7 +153,7 @@ export default function App() {
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Manifest V3 Chrome Extension • Sequential Queue • GSTR-2B • Local Storage Auto-Sync
+              Manifest V3 Chrome Extension • Sequential Queue • Multi-Return Automation • Local Storage Auto-Sync
             </p>
           </div>
         </div>

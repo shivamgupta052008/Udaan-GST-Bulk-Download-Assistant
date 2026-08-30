@@ -1,7 +1,7 @@
 import { QueueStore } from './queueStore';
 import { QueueJob, QueueState } from './queueTypes';
 import { DownloadMonitor } from '../downloads/downloadMonitor';
-import { GSTR2BAdapter } from '../adapters/gstr2bAdapter';
+import { getAdapterForReturnType } from '../adapters/adapterRegistry';
 import { detectPortalStatus } from '../gst/portalDetector';
 import { Logger } from '../shared/logger';
 import { sleep } from '../shared/utils';
@@ -12,14 +12,12 @@ export class DownloadQueueManager {
   private static instance: DownloadQueueManager | null = null;
   private isProcessing = false;
   private downloadMonitor: DownloadMonitor;
-  private gstr2bAdapter: GSTR2BAdapter;
   private queueListeners: Array<(state: QueueState) => void> = [];
   private activeJobAbortController: AbortController | null = null;
 
   private constructor() {
     this.downloadMonitor = DownloadMonitor.getInstance();
     this.downloadMonitor.init();
-    this.gstr2bAdapter = new GSTR2BAdapter();
     this.setupDownloadListeners();
   }
 
@@ -336,9 +334,10 @@ export class DownloadQueueManager {
         if (updatedJob && updatedJob.status === 'DOWNLOADED') {
           Logger.info(`[Queue Success] Test Job ${job.id} reached DOWNLOADED state safely.`);
         }
-      } else if (job.returnType === 'GSTR-2B') {
-        // Milestone 2 — Real GSTR-2B Live Portal Automation
-        Logger.info(`[Queue M2] Executing GSTR-2B Portal Automation for ${job.gstin} (${job.period} ${job.financialYear})...`);
+      } else {
+        // Milestone 4 — Multi-Return (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B) Live Portal Automation
+        const adapter = getAdapterForReturnType(job.returnType);
+        Logger.info(`[Queue M4] Executing ${job.returnType} Portal Automation for ${job.gstin} (${job.period} ${job.financialYear})...`);
 
         // Check if running in browser extension context with tabs
         let tabUrl = '';
@@ -368,7 +367,7 @@ export class DownloadQueueManager {
 
         // 1. Navigation & Period Selection
         try {
-          await this.gstr2bAdapter.navigateToPeriod(job.gstin, job.financialYear, job.period);
+          await adapter.navigateToPeriod(job.gstin, job.financialYear, job.period);
         } catch (navErr: unknown) {
           const errMsg = navErr instanceof Error ? navErr.message : String(navErr);
           if (errMsg.includes('GSTIN mismatch') || errMsg.includes('Unable to verify GSTIN')) {
@@ -378,7 +377,7 @@ export class DownloadQueueManager {
           }
           if (errMsg.includes('unavailable')) {
             Logger.warn(`[Period Guard] ${errMsg}`);
-            await this.handleJobFailure(job, `Requested GSTR-2B period '${job.period}' is unavailable on GST Portal.`);
+            await this.handleJobFailure(job, `Requested ${job.returnType} period '${job.period}' is unavailable on GST Portal.`);
             return;
           }
           throw navErr;
@@ -398,28 +397,28 @@ export class DownloadQueueManager {
         await QueueStore.updateJob(job.id, { status: 'GENERATING' });
         await this.notifyState();
 
-        const genRes = await this.gstr2bAdapter.triggerGenerateJson();
-        if (!genRes.success) {
-          throw new Error(genRes.error || 'Failed to trigger JSON generation on GST Portal');
+        if (adapter.triggerGenerateJson) {
+          const genRes = await adapter.triggerGenerateJson();
+          if (!genRes.success) {
+            throw new Error(genRes.error || `Failed to trigger ${job.returnType} JSON generation on GST Portal`);
+          }
         }
 
         // 4. WAITING_FOR_DOWNLOAD (Poll for generated link and trigger browser download)
         await QueueStore.updateJob(job.id, { status: 'WAITING_FOR_DOWNLOAD' });
         await this.notifyState();
 
-        const waitRes = await this.gstr2bAdapter.waitForGeneratedJsonAndDownload({
-          abortSignal: this.activeJobAbortController?.signal,
-        });
+        if (adapter.waitForGeneratedJsonAndDownload) {
+          const waitRes = await adapter.waitForGeneratedJsonAndDownload({
+            abortSignal: this.activeJobAbortController?.signal,
+          });
 
-        if (!waitRes.success || !waitRes.downloadTriggered) {
-          throw new Error(waitRes.error || 'Timed out waiting for GST Portal to generate GSTR-2B JSON file');
+          if (!waitRes.success || !waitRes.downloadTriggered) {
+            throw new Error(waitRes.error || `Timed out waiting for GST Portal to generate ${job.returnType} JSON file`);
+          }
         }
 
-        Logger.info(`[Queue] GSTR-2B JSON download initiated on GST Portal. Awaiting Chrome download event...`);
-      } else {
-        // GSTR-1, GSTR-2A, GSTR-3B are scheduled for future milestones
-        Logger.warn(`[Queue] ${job.returnType} download automation is scheduled for future milestones. Milestone 2 supports GSTR-2B only.`);
-        await this.handleJobFailure(job, `${job.returnType} download automation is scheduled for future milestones. Milestone 2 supports GSTR-2B only.`);
+        Logger.info(`[Queue] ${job.returnType} JSON download initiated on GST Portal. Awaiting Chrome download event...`);
       }
 
       // Clear activeJobId

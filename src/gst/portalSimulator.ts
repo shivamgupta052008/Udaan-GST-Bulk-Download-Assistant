@@ -127,8 +127,36 @@ export class GSTPortalSimulator {
           </div>
         </div>
 
-        <!-- Returns Cards & GSTR-2B Tile -->
+        <!-- Returns Cards & Multi-Return Tiles (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B) -->
         <div id="returns_cards_container" class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+          <!-- GSTR-1 Outward Supplies Card -->
+          <div id="gstr1_tile" class="card tile-gstr1 border border-slate-200 bg-slate-50/40 p-3.5 rounded-lg space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-xs text-slate-900">GSTR-1</span>
+              <span class="text-[10px] px-2 py-0.5 bg-slate-200 text-slate-800 rounded font-semibold">Prepare Offline</span>
+            </div>
+            <p class="text-xs text-slate-600">Details of outward supplies</p>
+            <div class="flex gap-2 pt-1">
+              <a id="gstr1_download_btn" href="#/gstr1/download" class="btn-download px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded text-center block w-full">
+                DOWNLOAD
+              </a>
+            </div>
+          </div>
+
+          <!-- GSTR-2A Auto-drafted Details Card -->
+          <div id="gstr2a_tile" class="card tile-gstr2a border border-slate-200 bg-slate-50/40 p-3.5 rounded-lg space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-xs text-slate-900">GSTR-2A</span>
+              <span class="text-[10px] px-2 py-0.5 bg-slate-200 text-slate-800 rounded font-semibold">View / Download</span>
+            </div>
+            <p class="text-xs text-slate-600">Auto-drafted details</p>
+            <div class="flex gap-2 pt-1">
+              <a id="gstr2a_download_btn" href="#/gstr2a/download" class="btn-download px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded text-center block w-full">
+                DOWNLOAD
+              </a>
+            </div>
+          </div>
+
           <!-- GSTR-2B Auto-drafted ITC Statement Card -->
           <div id="gstr2b_tile" class="card tile-gstr2b border border-blue-200 bg-blue-50/40 p-3.5 rounded-lg space-y-2">
             <div class="flex items-center justify-between">
@@ -138,6 +166,20 @@ export class GSTPortalSimulator {
             <p class="text-xs text-slate-600">Auto-drafted ITC Statement</p>
             <div class="flex gap-2 pt-1">
               <a id="gstr2b_download_btn" href="#/gstr2b/download" class="btn-download px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded text-center block w-full">
+                DOWNLOAD
+              </a>
+            </div>
+          </div>
+
+          <!-- GSTR-3B Monthly Return Card -->
+          <div id="gstr3b_tile" class="card tile-gstr3b border border-slate-200 bg-slate-50/40 p-3.5 rounded-lg space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-xs text-slate-900">GSTR-3B</span>
+              <span class="text-[10px] px-2 py-0.5 bg-slate-200 text-slate-800 rounded font-semibold">Monthly Return</span>
+            </div>
+            <p class="text-xs text-slate-600">Monthly Return & Summary</p>
+            <div class="flex gap-2 pt-1">
+              <a id="gstr3b_download_btn" href="#/gstr3b/download" class="btn-download px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded text-center block w-full">
                 DOWNLOAD
               </a>
             </div>

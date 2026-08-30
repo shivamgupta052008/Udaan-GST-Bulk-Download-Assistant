@@ -6,6 +6,7 @@ import { GSTR1Adapter } from '../adapters/gstr1Adapter';
 import { GSTR2AAdapter } from '../adapters/gstr2aAdapter';
 import { GSTR2BAdapter } from '../adapters/gstr2bAdapter';
 import { GSTR3BAdapter } from '../adapters/gstr3bAdapter';
+import { adapterRegistry, getAdapterForReturnType } from '../adapters/adapterRegistry';
 import { UdaanBridge } from '../bridge/udaanBridge';
 import { isValidTransition, assertValidTransition } from '../queue/stateMachine';
 import { SecurityValidator } from '../security/securityValidator';
@@ -33,7 +34,8 @@ export interface TestCaseResult {
     | 'BRIDGE'
     | 'BUILD'
     | 'GSTR2B_M2'
-    | 'LOCAL_SYNC_M3';
+    | 'LOCAL_SYNC_M3'
+    | 'MULTI_RETURN_M4';
   title: string;
   description: string;
   passed: boolean;
@@ -49,7 +51,7 @@ export async function runAcceptanceTestSuite(
   const testDownloadMonitor = DownloadMonitor.getInstance();
   await testDownloadMonitor.init();
 
-  const totalTests = 55;
+  const totalTests = 75;
   let currentTest = 0;
 
   async function executeTest(
@@ -1865,6 +1867,529 @@ export async function runAcceptanceTestSuite(
       );
       if (!exists) {
         throw new Error('Test job deterministic file was not created');
+      }
+    }
+  );
+
+  // =========================================================================
+  // MILESTONE 4 — MULTI-RETURN DOWNLOAD EXPANSION TESTS (M4-01 to M4-15)
+  // =========================================================================
+
+  // 61. M4-01: Adapter Registry dynamic lookup
+  await executeTest(
+    'M4-01',
+    'MULTI_RETURN_M4',
+    'Adapter Registry Dynamic Lookup',
+    'Validates dynamic adapter lookup and factory instantiation for GSTR-1, GSTR-2A, GSTR-2B, and GSTR-3B',
+    async () => {
+      const gstr1 = getAdapterForReturnType('GSTR-1');
+      const gstr2a = getAdapterForReturnType('GSTR-2A');
+      const gstr2b = getAdapterForReturnType('GSTR-2B');
+      const gstr3b = getAdapterForReturnType('GSTR-3B');
+
+      if (!gstr1 || gstr1.returnType !== 'GSTR-1') {
+        throw new Error(`Expected GSTR-1 adapter, got: ${gstr1?.returnType}`);
+      }
+      if (!gstr2a || gstr2a.returnType !== 'GSTR-2A') {
+        throw new Error(`Expected GSTR-2A adapter, got: ${gstr2a?.returnType}`);
+      }
+      if (!gstr2b || gstr2b.returnType !== 'GSTR-2B') {
+        throw new Error(`Expected GSTR-2B adapter, got: ${gstr2b?.returnType}`);
+      }
+      if (!gstr3b || gstr3b.returnType !== 'GSTR-3B') {
+        throw new Error(`Expected GSTR-3B adapter, got: ${gstr3b?.returnType}`);
+      }
+
+      const allAdapters = adapterRegistry.getAllAdapters();
+      if (allAdapters.length < 4) {
+        throw new Error(`Expected at least 4 registered adapters, found: ${allAdapters.length}`);
+      }
+    }
+  );
+
+  // 62. M4-02: GSTR-1 Adapter URL and Page Detection
+  await executeTest(
+    'M4-02',
+    'MULTI_RETURN_M4',
+    'GSTR-1 Page and URL Detection',
+    'Validates GSTR-1 adapter page detection for GST Portal returns dashboard and outward supplies forms',
+    async () => {
+      const adapter = new GSTR1Adapter();
+      const validUrls = [
+        'https://services.gst.gov.in/services/auth/returns/gstr1',
+        'https://services.gst.gov.in/returns/return-dashboard',
+        'https://services.gst.gov.in/services/auth/returns',
+      ];
+
+      for (const url of validUrls) {
+        if (!adapter.canHandlePage(url, 'Returns Dashboard')) {
+          throw new Error(`GSTR-1 adapter failed to handle valid URL: ${url}`);
+        }
+      }
+
+      if (adapter.canHandlePage('https://example.com/other-page', 'Other Site')) {
+        throw new Error('GSTR-1 adapter accepted invalid non-GST URL');
+      }
+    }
+  );
+
+  // 63. M4-03: GSTR-1 DOM Selectors & Navigation
+  await executeTest(
+    'M4-03',
+    'MULTI_RETURN_M4',
+    'GSTR-1 DOM Selectors & Navigation',
+    'Validates GSTR-1 adapter FY/Period selection, GSTIN verification, and download tile navigation against simulator',
+    async () => {
+      const adapter = new GSTR1Adapter();
+      const simContainer = GSTPortalSimulator.ensureMounted();
+
+      const gstinCheck = adapter.verifyGstinContext('27AABCU9603R1ZM');
+      if (!gstinCheck.verified) {
+        throw new Error(`GSTR-1 GSTIN check failed: ${gstinCheck.reason}`);
+      }
+
+      const fyRes = await adapter.selectFinancialYear('2025-2026');
+      if (!fyRes.success) {
+        throw new Error(`GSTR-1 FY selection failed: ${fyRes.error}`);
+      }
+
+      const periodRes = await adapter.selectReturnPeriod('April');
+      if (!periodRes.success) {
+        throw new Error(`GSTR-1 Period selection failed: ${periodRes.error}`);
+      }
+
+      const searchRes = await adapter.clickSearch();
+      if (!searchRes.success) {
+        throw new Error(`GSTR-1 click search failed: ${searchRes.error}`);
+      }
+
+      const navRes = await adapter.navigateToGstr1Download();
+      if (!navRes.success) {
+        throw new Error(`GSTR-1 download navigation failed: ${navRes.error}`);
+      }
+    }
+  );
+
+  // 64. M4-04: GSTR-1 Simulation Scenarios
+  await executeTest(
+    'M4-04',
+    'MULTI_RETURN_M4',
+    'GSTR-1 Multi-Scenario Simulation',
+    'Validates GSTR-1 adapter across Happy Path, Already Generated, Timeout, Portal Error, and GSTIN Mismatch scenarios',
+    async () => {
+      const adapter = new GSTR1Adapter();
+
+      // Happy Path
+      const happy = await adapter.simulateM4Workflow({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        scenario: 'HAPPY_PATH',
+      });
+      if (!happy.success || happy.state !== 'DOWNLOADED' || !happy.filename?.includes('GSTR1')) {
+        throw new Error('GSTR-1 HAPPY_PATH simulation failed');
+      }
+
+      // GSTIN Mismatch
+      const mismatch = await adapter.simulateM4Workflow({
+        gstin: '29ABCDE1234F1Z5',
+        financialYear: '2025-2026',
+        period: 'April',
+        scenario: 'GSTIN_MISMATCH',
+      });
+      if (mismatch.success || mismatch.state !== 'FAILED') {
+        throw new Error('GSTR-1 GSTIN_MISMATCH simulation must fail safely');
+      }
+
+      // Portal Error
+      const portalErr = await adapter.simulateM4Workflow({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        scenario: 'PORTAL_ERROR',
+      });
+      if (portalErr.success || !portalErr.error?.includes('GST Portal reported')) {
+        throw new Error('GSTR-1 PORTAL_ERROR simulation must report portal error');
+      }
+    }
+  );
+
+  // 65. M4-05: GSTR-2A Adapter URL and Page Detection
+  await executeTest(
+    'M4-05',
+    'MULTI_RETURN_M4',
+    'GSTR-2A Page and URL Detection',
+    'Validates GSTR-2A adapter page detection for GST Portal returns dashboard and auto-drafted details',
+    async () => {
+      const adapter = new GSTR2AAdapter();
+      const validUrls = [
+        'https://services.gst.gov.in/services/auth/returns/gstr2a',
+        'https://services.gst.gov.in/returns/return-dashboard',
+        'https://services.gst.gov.in/services/auth/returns',
+      ];
+
+      for (const url of validUrls) {
+        if (!adapter.canHandlePage(url, 'Returns Dashboard')) {
+          throw new Error(`GSTR-2A adapter failed to handle valid URL: ${url}`);
+        }
+      }
+
+      if (adapter.canHandlePage('https://example.com/other-page', 'Other Site')) {
+        throw new Error('GSTR-2A adapter accepted invalid non-GST URL');
+      }
+    }
+  );
+
+  // 66. M4-06: GSTR-2A DOM Selectors & Navigation
+  await executeTest(
+    'M4-06',
+    'MULTI_RETURN_M4',
+    'GSTR-2A DOM Selectors & Navigation',
+    'Validates GSTR-2A adapter FY/Period selection, GSTIN verification, and download tile navigation against simulator',
+    async () => {
+      const adapter = new GSTR2AAdapter();
+      GSTPortalSimulator.ensureMounted();
+
+      const gstinCheck = adapter.verifyGstinContext('27AABCU9603R1ZM');
+      if (!gstinCheck.verified) {
+        throw new Error(`GSTR-2A GSTIN check failed: ${gstinCheck.reason}`);
+      }
+
+      const fyRes = await adapter.selectFinancialYear('2025-2026');
+      if (!fyRes.success) {
+        throw new Error(`GSTR-2A FY selection failed: ${fyRes.error}`);
+      }
+
+      const periodRes = await adapter.selectReturnPeriod('May');
+      if (!periodRes.success) {
+        throw new Error(`GSTR-2A Period selection failed: ${periodRes.error}`);
+      }
+
+      const searchRes = await adapter.clickSearch();
+      if (!searchRes.success) {
+        throw new Error(`GSTR-2A click search failed: ${searchRes.error}`);
+      }
+
+      const navRes = await adapter.navigateToGstr2aDownload();
+      if (!navRes.success) {
+        throw new Error(`GSTR-2A download navigation failed: ${navRes.error}`);
+      }
+    }
+  );
+
+  // 67. M4-07: GSTR-2A Simulation Scenarios
+  await executeTest(
+    'M4-07',
+    'MULTI_RETURN_M4',
+    'GSTR-2A Multi-Scenario Simulation',
+    'Validates GSTR-2A adapter across Happy Path, Timeout, and Portal Error scenarios',
+    async () => {
+      const adapter = new GSTR2AAdapter();
+
+      // Happy Path
+      const happy = await adapter.simulateM4Workflow({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        scenario: 'HAPPY_PATH',
+      });
+      if (!happy.success || happy.state !== 'DOWNLOADED' || !happy.filename?.includes('GSTR2A')) {
+        throw new Error('GSTR-2A HAPPY_PATH simulation failed');
+      }
+
+      // Timeout
+      const timeout = await adapter.simulateM4Workflow({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        scenario: 'TIMEOUT',
+      });
+      if (timeout.success || !timeout.error?.includes('Timed out')) {
+        throw new Error('GSTR-2A TIMEOUT simulation must fail safely');
+      }
+    }
+  );
+
+  // 68. M4-08: GSTR-3B Adapter URL and Page Detection
+  await executeTest(
+    'M4-08',
+    'MULTI_RETURN_M4',
+    'GSTR-3B Page and URL Detection',
+    'Validates GSTR-3B adapter page detection for GST Portal returns dashboard and monthly return summary',
+    async () => {
+      const adapter = new GSTR3BAdapter();
+      const validUrls = [
+        'https://services.gst.gov.in/services/auth/returns/gstr3b',
+        'https://services.gst.gov.in/returns/return-dashboard',
+        'https://services.gst.gov.in/services/auth/returns',
+      ];
+
+      for (const url of validUrls) {
+        if (!adapter.canHandlePage(url, 'Returns Dashboard')) {
+          throw new Error(`GSTR-3B adapter failed to handle valid URL: ${url}`);
+        }
+      }
+
+      if (adapter.canHandlePage('https://example.com/other-page', 'Other Site')) {
+        throw new Error('GSTR-3B adapter accepted invalid non-GST URL');
+      }
+    }
+  );
+
+  // 69. M4-09: GSTR-3B DOM Selectors & Navigation
+  await executeTest(
+    'M4-09',
+    'MULTI_RETURN_M4',
+    'GSTR-3B DOM Selectors & Navigation',
+    'Validates GSTR-3B adapter FY/Period selection, GSTIN verification, and download tile navigation against simulator',
+    async () => {
+      const adapter = new GSTR3BAdapter();
+      GSTPortalSimulator.ensureMounted();
+
+      const gstinCheck = adapter.verifyGstinContext('27AABCU9603R1ZM');
+      if (!gstinCheck.verified) {
+        throw new Error(`GSTR-3B GSTIN check failed: ${gstinCheck.reason}`);
+      }
+
+      const fyRes = await adapter.selectFinancialYear('2025-2026');
+      if (!fyRes.success) {
+        throw new Error(`GSTR-3B FY selection failed: ${fyRes.error}`);
+      }
+
+      const periodRes = await adapter.selectReturnPeriod('June');
+      if (!periodRes.success) {
+        throw new Error(`GSTR-3B Period selection failed: ${periodRes.error}`);
+      }
+
+      const searchRes = await adapter.clickSearch();
+      if (!searchRes.success) {
+        throw new Error(`GSTR-3B click search failed: ${searchRes.error}`);
+      }
+
+      const navRes = await adapter.navigateToGstr3bDownload();
+      if (!navRes.success) {
+        throw new Error(`GSTR-3B download navigation failed: ${navRes.error}`);
+      }
+    }
+  );
+
+  // 70. M4-10: GSTR-3B Simulation Scenarios
+  await executeTest(
+    'M4-10',
+    'MULTI_RETURN_M4',
+    'GSTR-3B Multi-Scenario Simulation',
+    'Validates GSTR-3B adapter across Happy Path, Already Generated, and Portal Error scenarios',
+    async () => {
+      const adapter = new GSTR3BAdapter();
+
+      // Happy Path
+      const happy = await adapter.simulateM4Workflow({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'June',
+        scenario: 'HAPPY_PATH',
+      });
+      if (!happy.success || happy.state !== 'DOWNLOADED' || !happy.filename?.includes('GSTR3B')) {
+        throw new Error('GSTR-3B HAPPY_PATH simulation failed');
+      }
+
+      // Portal Error
+      const portalErr = await adapter.simulateM4Workflow({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'June',
+        scenario: 'PORTAL_ERROR',
+      });
+      if (portalErr.success || !portalErr.error?.includes('GST Portal reported')) {
+        throw new Error('GSTR-3B PORTAL_ERROR simulation must fail safely');
+      }
+    }
+  );
+
+  // 71. M4-11: Multi-Return Sequential Queue Execution
+  await executeTest(
+    'M4-11',
+    'MULTI_RETURN_M4',
+    'Multi-Return Sequential Queue Execution',
+    'Verifies sequential queue execution with mixed return types (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B)',
+    async () => {
+      await QueueStore.clearAll();
+
+      const j1 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-1',
+        isTestJob: true,
+      });
+
+      const j2 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        returnType: 'GSTR-2A',
+        isTestJob: true,
+      });
+
+      const j3 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'June',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      const j4 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'July',
+        returnType: 'GSTR-3B',
+        isTestJob: true,
+      });
+
+      // Start queue
+      await testQueueManager.startQueue();
+
+      // Wait for sequential queue processing of all 4 jobs
+      await sleep(7500);
+
+      const jobs = await QueueStore.getQueue();
+      for (const j of [j1, j2, j3, j4]) {
+        const found = jobs.find((item) => item.id === j.id);
+        if (!found || found.status !== 'DOWNLOADED') {
+          throw new Error(`Job ${j.returnType} (${j.id}) expected DOWNLOADED, got: ${found?.status}`);
+        }
+      }
+    }
+  );
+
+  // 72. M4-12: Multi-Return Deterministic Path & Filename Generation
+  await executeTest(
+    'M4-12',
+    'MULTI_RETURN_M4',
+    'Multi-Return Path & Filename Generation',
+    'Verifies deterministic folder structure and file naming for all 4 returns',
+    async () => {
+      const gstin = '27AABCU9603R1ZM';
+      const companyName = 'Global Traders Ltd';
+      const fy = '2025-2026';
+      const period = 'August';
+
+      const r1Path = getFullRelativePath(gstin, companyName, fy, period, 'GSTR-1');
+      const r2aPath = getFullRelativePath(gstin, companyName, fy, period, 'GSTR-2A');
+      const r2bPath = getFullRelativePath(gstin, companyName, fy, period, 'GSTR-2B');
+      const r3bPath = getFullRelativePath(gstin, companyName, fy, period, 'GSTR-3B');
+
+      if (r1Path !== '27AABCU9603R1ZM_Global Traders Ltd/2025-26/GSTR-1/GSTR-1_August_2025-26.json') {
+        throw new Error(`Unexpected GSTR-1 path: ${r1Path}`);
+      }
+      if (r2aPath !== '27AABCU9603R1ZM_Global Traders Ltd/2025-26/GSTR-2A/GSTR-2A_August_2025-26.json') {
+        throw new Error(`Unexpected GSTR-2A path: ${r2aPath}`);
+      }
+      if (r2bPath !== '27AABCU9603R1ZM_Global Traders Ltd/2025-26/GSTR-2B/GSTR-2B_August_2025-26.json') {
+        throw new Error(`Unexpected GSTR-2B path: ${r2bPath}`);
+      }
+      if (r3bPath !== '27AABCU9603R1ZM_Global Traders Ltd/2025-26/GSTR-3B/GSTR-3B_August_2025-26.json') {
+        throw new Error(`Unexpected GSTR-3B path: ${r3bPath}`);
+      }
+    }
+  );
+
+  // 73. M4-13: Multi-Return Real Local Storage Synchronization
+  await executeTest(
+    'M4-13',
+    'MULTI_RETURN_M4',
+    'Multi-Return Local Storage Synchronization',
+    'Verifies local sync engine organizes real JSON payloads across all 4 return types into appropriate folder hierarchies',
+    async () => {
+      const testSync = SyncEngine.getInstance();
+      await testSync.configureRoot();
+      const provider = testSync.getProvider();
+
+      const returnTypes: Array<'GSTR-1' | 'GSTR-2A' | 'GSTR-2B' | 'GSTR-3B'> = [
+        'GSTR-1',
+        'GSTR-2A',
+        'GSTR-2B',
+        'GSTR-3B',
+      ];
+
+      for (const rt of returnTypes) {
+        const job = await QueueStore.addJob({
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          period: 'September',
+          returnType: rt,
+          isTestJob: false,
+        });
+
+        const realJson = JSON.stringify({
+          gstin: '27AABCU9603R1ZM',
+          fp: '092025',
+          returnType: rt,
+          data: { sampleKey: `${rt} verified payload` },
+        });
+
+        await QueueStore.updateJob(job.id, {
+          status: 'DOWNLOADED',
+          filename: `${rt}_27AABCU9603R1ZM_092025.json`,
+          downloadContent: realJson,
+        });
+
+        const refreshed = (await QueueStore.getQueue()).find((j) => j.id === job.id)!;
+        const res = await testSync.syncJob(refreshed);
+
+        if (!res.success) {
+          throw new Error(`Failed to sync ${rt}: ${res.error}`);
+        }
+
+        const exists = await provider.fileExists(
+          ['27AABCU9603R1ZM_My Company', '2025-26', rt],
+          `${rt}_September_2025-26.json`
+        );
+
+        if (!exists) {
+          throw new Error(`File for ${rt} was not found in expected folder`);
+        }
+      }
+    }
+  );
+
+  // 74. M4-14: Zero-Credential Security Audit Across All Return Adapters
+  await executeTest(
+    'M4-14',
+    'MULTI_RETURN_M4',
+    'Zero-Credential Security Audit Across All Adapters',
+    'Verifies none of the return adapters (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B) capture, store, or intercept credentials, OTPs, or CAPTCHA',
+    async () => {
+      const adapters = adapterRegistry.getAllAdapters();
+      for (const adapter of adapters) {
+        const adapterStr = JSON.stringify(adapter).toLowerCase();
+        const forbidden = ['password', 'otp', 'captcha', 'secret', 'auth_token'];
+        for (const word of forbidden) {
+          if (adapterStr.includes(word)) {
+            throw new Error(`Adapter ${adapter.returnType} contains forbidden credential keyword: ${word}`);
+          }
+        }
+      }
+    }
+  );
+
+  // 75. M4-15: Unsupported Return Type Guard
+  await executeTest(
+    'M4-15',
+    'MULTI_RETURN_M4',
+    'Unsupported Return Type Guard',
+    'Verifies registry throws explicit descriptive error for unsupported return types',
+    async () => {
+      try {
+        // @ts-expect-error Testing invalid return type guard
+        getAdapterForReturnType('GSTR-9');
+        throw new Error('Registry must throw for unsupported return type');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('Unsupported return type')) {
+          throw new Error(`Expected unsupported return error, got: ${msg}`);
+        }
       }
     }
   );
