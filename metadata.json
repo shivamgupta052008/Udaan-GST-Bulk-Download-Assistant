@@ -1,6 +1,6 @@
 {
   "name": "Udaan GST Bulk Download Assistant",
-  "description": "Standalone Manifest V3 Chrome Extension & Development Workbench for GST bulk return downloads, sequential queue processing, and portal detection.",
+  "description": "Production-ready Chrome Extension & Workbench for GST bulk return downloads (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B), sequential queue processing, local file sync, bulk planning, diagnostics, and recovery.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

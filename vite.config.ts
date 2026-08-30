@@ -13,7 +13,15 @@ export default defineConfig(() => {
       dedupe: ['react', 'react-dom'],
     },
     optimizeDeps: {
-      include: ['react', 'react-dom', 'lucide-react'],
+      include: ['react', 'react-dom', 'lucide-react', 'motion'],
+    },
+    build: {
+      rollupOptions: {
+        input: {
+          main: path.resolve(__dirname, 'index.html'),
+          popup: path.resolve(__dirname, 'popup.html'),
+        },
+      },
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

@@ -2,11 +2,12 @@
   "manifest_version": 3,
   "name": "Udaan GST Bulk Download Assistant",
   "version": "1.0.0",
-  "description": "Milestone 1: Clean standalone foundation for GST bulk return downloads, sequential queue processing, and portal detection.",
+  "description": "Complete M1–M6 GST Bulk Return Assistant: multi-return queue (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B), local file sync, bulk planner, system diagnostics, and backup & restore.",
   "permissions": [
     "storage",
     "downloads",
-    "tabs"
+    "tabs",
+    "alarms"
   ],
   "host_permissions": [
     "*://services.gst.gov.in/*",
@@ -30,16 +31,6 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Udaan GST Bulk Download Assistant",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "default_title": "Udaan GST Bulk Download Assistant"
   }
 }

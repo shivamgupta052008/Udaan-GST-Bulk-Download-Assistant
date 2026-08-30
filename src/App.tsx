@@ -745,23 +745,31 @@ export default function App() {
                 </div>
 
                 <div className="bg-white p-4.5 rounded-xl border border-slate-200 space-y-3 shadow-xs">
-                  <h3 className="font-semibold text-slate-900 text-xs">Milestone Roadmap</h3>
+                  <h3 className="font-semibold text-slate-900 text-xs">Milestone Status (M1–M6 Complete)</h3>
                   <div className="space-y-2 text-xs">
                     <div className="flex items-center gap-2.5">
-                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M1 (Completed)</span>
-                      <span className="text-slate-800">Extension foundation, portal detector, sequential queue engine, download monitor.</span>
+                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M1 Complete</span>
+                      <span className="text-slate-800">Extension foundation, portal detector, sequential queue engine, persistent state.</span>
                     </div>
-                    <div className="flex items-center gap-2.5 text-slate-500">
-                      <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200/60 font-semibold font-mono text-[11px]">M2</span>
-                      <span>GSTR-1 / GSTR-2A / GSTR-2B / GSTR-3B portal automation adapters.</span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M2 Complete</span>
+                      <span className="text-slate-800">GSTR-2B automation adapter, period navigation, generation timeouts, and download tracking.</span>
                     </div>
-                    <div className="flex items-center gap-2.5 text-slate-500">
-                      <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200/60 font-semibold font-mono text-[11px]">M3</span>
-                      <span>Udaan ↔ Extension local bridge communication.</span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M3 Complete</span>
+                      <span className="text-slate-800">Local storage sync, File System Access API root folder, deterministic paths, and auto-sync.</span>
                     </div>
-                    <div className="flex items-center gap-2.5 text-slate-500">
-                      <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200/60 font-semibold font-mono text-[11px]">M4-M7</span>
-                      <span>File classification, IndexedDB sync, local disk storage, auto-retry recovery.</span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M4 Complete</span>
+                      <span className="text-slate-800">Multi-return adapters for GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B with adapter registry.</span>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M5 Complete</span>
+                      <span className="text-slate-800">Bulk Job Planner, matrix period selection, queue metrics, multi-filtering & bulk actions.</span>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/60 font-semibold font-mono text-[11px]">M6 Complete</span>
+                      <span className="text-slate-800">Error classification taxonomy, diagnostics & self-healing, schema manager, and JSON backup/restore.</span>
                     </div>
                   </div>
                 </div>

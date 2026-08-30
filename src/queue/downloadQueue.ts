@@ -217,7 +217,13 @@ export class DownloadQueueManager {
 
   public async resumeQueue(): Promise<void> {
     Logger.info('[Queue Resumed] Resuming sequential queue execution.');
-    await this.startQueue();
+    const state = await QueueStore.getQueueState();
+    state.isPaused = false;
+    state.isRunning = true;
+    await QueueStore.saveQueueState(state);
+    await this.notifyState();
+    this.isProcessing = false;
+    this.processNext();
   }
 
   public async retryJob(jobId: string): Promise<QueueJob | null> {
