@@ -1,11 +1,14 @@
 import { ExtensionStorage } from '../storage/extensionStorage';
-import { QueueJob, QueueState, QueueStatus } from './queueTypes';
+import { QueueJob, QueueState, QueueStatus, JobHistoryEvent } from './queueTypes';
 import { generateId, areFinancialYearsEquivalent } from '../shared/utils';
 import { QUEUE_CONFIG } from '../shared/constants';
 import { Logger } from '../shared/logger';
 import { isValidTransition } from './stateMachine';
+import { GstErrorCode } from '../diagnostics/errorClassification';
 
 export class QueueStore {
+  public static readonly MAX_JOB_HISTORY = 50;
+
   public static async getQueue(): Promise<QueueJob[]> {
     return await ExtensionStorage.getJobs();
   }
@@ -26,6 +29,26 @@ export class QueueStore {
     partial: Partial<Omit<QueueState, 'jobs'>>
   ): Promise<QueueState> {
     return await ExtensionStorage.updateQueueState(partial);
+  }
+
+  /**
+   * Helper to append an event to a job's bounded history (<= 50 entries)
+   */
+  public static appendHistoryEvent(
+    job: QueueJob,
+    status: QueueStatus,
+    errorCode?: GstErrorCode | null,
+    message?: string | null
+  ): JobHistoryEvent[] {
+    const existing = job.history || [];
+    const event: JobHistoryEvent = {
+      timestamp: Date.now(),
+      status,
+      errorCode: errorCode || null,
+      message: message || null,
+    };
+    const updated = [event, ...existing];
+    return updated.slice(0, this.MAX_JOB_HISTORY);
   }
 
   /**
@@ -103,13 +126,14 @@ export class QueueStore {
       }
     }
 
+    const initialStatus = jobData.status || 'PENDING';
     const newJob: QueueJob = {
       id: generateId('job'),
       gstin: jobData.gstin.trim().toUpperCase(),
       financialYear: jobData.financialYear,
       period: jobData.period,
       returnType: jobData.returnType,
-      status: jobData.status || 'PENDING',
+      status: initialStatus,
       isTestJob: jobData.isTestJob ?? true,
       retryCount: 0,
       maxRetries: jobData.maxRetries ?? QUEUE_CONFIG.MAX_RETRIES,
@@ -119,6 +143,17 @@ export class QueueStore {
       companyName: jobData.companyName || null,
       createdAt: now,
       updatedAt: now,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      lastErrorAt: null,
+      history: [
+        {
+          timestamp: now,
+          status: initialStatus,
+          errorCode: null,
+          message: 'Job initialized and added to queue',
+        },
+      ],
     };
 
     state.jobs.push(newJob);
@@ -151,9 +186,23 @@ export class QueueStore {
       }
     }
 
+    const targetStatus = updates.status || currentJob.status;
+    let history = currentJob.history || [];
+
+    // Append to history if status changed or new error provided
+    if ((updates.status && updates.status !== currentJob.status) || updates.lastErrorCode || updates.error) {
+      history = this.appendHistoryEvent(
+        currentJob,
+        targetStatus,
+        updates.lastErrorCode || currentJob.lastErrorCode,
+        updates.lastErrorMessage || updates.error || (updates.status ? `Transition to ${updates.status}` : undefined)
+      );
+    }
+
     const updatedJob: QueueJob = {
       ...currentJob,
       ...updates,
+      history: updates.history || history,
       updatedAt: Date.now(),
     };
 
@@ -224,13 +273,25 @@ export class QueueStore {
 
     if (index === -1) return null;
 
+    const current = state.jobs[index];
+    const updatedHistory = this.appendHistoryEvent(
+      current,
+      'PENDING',
+      null,
+      'Manual retry / job reset to PENDING'
+    );
+
     state.jobs[index] = {
-      ...state.jobs[index],
+      ...current,
       status: 'PENDING',
       error: null,
       retryCount: 0,
       startedAt: null,
       completedAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      lastErrorAt: null,
+      history: updatedHistory,
       updatedAt: Date.now(),
     };
 
@@ -238,5 +299,23 @@ export class QueueStore {
     Logger.info(`[Job Reset for Retry] Job ID: ${id} cleared and set to PENDING`);
     return state.jobs[index];
   }
+
+  /**
+   * Milestone 5: Bulk Job Creation Integration
+   */
+  public static async bulkAddJobs(
+    params: {
+      gstin: string;
+      companyName?: string;
+      financialYear: string;
+      periods: string[];
+      returnTypes: string[];
+    },
+    options?: { isTestJob?: boolean }
+  ) {
+    const { BulkPlanner } = await import('./bulkPlanner');
+    return await BulkPlanner.executeBulkCreation(params as any, options);
+  }
 }
+
 

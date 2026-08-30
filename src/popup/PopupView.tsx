@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Download,
   Play,
@@ -14,12 +14,14 @@ import {
   Terminal,
   RefreshCw,
   FileCheck,
-  ChevronRight,
+  Layers,
   Sparkles,
   FolderSync,
   Folder,
   HardDrive,
   Check,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import { PortalStatus } from '../gst/portalDetector';
 import { QueueJob, QueueState, QueueStatus, SyncStatus } from '../queue/queueTypes';
@@ -36,6 +38,14 @@ import { DownloadQueueManager } from '../queue/downloadQueue';
 import { QueueStore } from '../queue/queueStore';
 import { SyncEngine } from '../sync/syncEngine';
 import { LocalSyncSettings } from '../sync/syncTypes';
+import { BulkJobPlannerModal } from './BulkJobPlannerModal';
+import { QueueFilterAndActions } from './QueueFilterAndActions';
+import { QueueSummaryBar } from './QueueSummaryBar';
+import { DiagnosticsModal } from './DiagnosticsModal';
+import { BackupRestoreModal } from './BackupRestoreModal';
+import { JobDetailsModal } from './JobDetailsModal';
+import { BulkPlanner, QueueFilterState, BulkCreationResult } from '../queue/bulkPlanner';
+import { Activity, HardDriveDownload, Info } from 'lucide-react';
 
 interface PopupViewProps {
   initialPortalStatus?: PortalStatus;
@@ -79,9 +89,26 @@ export const PopupView: React.FC<PopupViewProps> = ({
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showBulkPlanner, setShowBulkPlanner] = useState(false);
+  const [showDiagnosticsModal, setShowDiagnosticsModal] = useState(false);
+  const [showBackupModal, setShowBackupModal] = useState(false);
+  const [selectedJobForDetails, setSelectedJobForDetails] = useState<QueueJob | null>(null);
 
-  // New Test Job Form State
-  const [testGstin, setTestGstin] = useState('TESTGSTIN');
+  // Filter & Search state (Phase 6)
+  const [filterState, setFilterState] = useState<QueueFilterState>({
+    status: 'ALL',
+    returnType: 'ALL',
+    financialYear: 'ALL',
+    gstin: 'ALL',
+    searchQuery: '',
+  });
+
+  // Selected Job IDs state (Phase 7)
+  const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
+
+  // New Single Test Job Form State
+  const [testGstin, setTestGstin] = useState('27AABCU9603R1ZM');
   const [testFy, setTestFy] = useState<FinancialYear>('2025-2026');
   const [testPeriod, setTestPeriod] = useState<ReturnPeriod>('April');
   const [testReturnType, setTestReturnType] = useState<ReturnType>('GSTR-2B');
@@ -142,6 +169,38 @@ export const PopupView: React.FC<PopupViewProps> = ({
       setPortalStatus(initialPortalStatus);
     }
   }, [initialPortalStatus]);
+
+  // Derived filter collections and visible jobs
+  const availableGstins = useMemo(() => {
+    return Array.from(
+      new Set(queueState.jobs.map((j) => (j.gstin || '').trim().toUpperCase()))
+    ).filter(Boolean);
+  }, [queueState.jobs]);
+
+  const availableFinancialYears = useMemo(() => {
+    return Array.from(new Set(queueState.jobs.map((j) => j.financialYear))).filter(Boolean);
+  }, [queueState.jobs]);
+
+  const visibleJobs = useMemo(() => {
+    return BulkPlanner.filterJobs(queueState.jobs, filterState, queueState.activeJobId);
+  }, [queueState.jobs, filterState, queueState.activeJobId]);
+
+  // Selection calculations
+  const visibleJobIds = useMemo(() => visibleJobs.map((j) => j.id), [visibleJobs]);
+  const isAllVisibleSelected =
+    visibleJobs.length > 0 && visibleJobs.every((j) => selectedJobIds.includes(j.id));
+
+  const selectedJobs = useMemo(() => {
+    return queueState.jobs.filter((j) => selectedJobIds.includes(j.id));
+  }, [queueState.jobs, selectedJobIds]);
+
+  const retryableCount = useMemo(() => {
+    return selectedJobs.filter((j) => j.status === 'FAILED').length;
+  }, [selectedJobs]);
+
+  const syncableCount = useMemo(() => {
+    return selectedJobs.filter((j) => j.status === 'DOWNLOADED').length;
+  }, [selectedJobs]);
 
   // Handlers
   const handleOpenGSTPortal = () => {
@@ -226,7 +285,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
   const handleAddDefaultTestJob = async () => {
     try {
       await QueueStore.addJob({
-        gstin: 'TESTGSTIN',
+        gstin: '27AABCU9603R1ZM',
         financialYear: '2025-2026',
         period: 'April',
         returnType: 'GSTR-2B',
@@ -243,7 +302,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
     e.preventDefault();
     try {
       await QueueStore.addJob({
-        gstin: testGstin.trim().toUpperCase() || 'TESTGSTIN',
+        gstin: testGstin.trim().toUpperCase() || '27AABCU9603R1ZM',
         financialYear: testFy,
         period: testPeriod,
         returnType: testReturnType,
@@ -255,6 +314,14 @@ export const PopupView: React.FC<PopupViewProps> = ({
     } catch (err: unknown) {
       Logger.warn(`[Popup] Could not add custom job: ${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+
+  const handleBulkCreated = (result: BulkCreationResult) => {
+    setSyncMessage(
+      `Bulk created ${result.created} jobs (${result.skippedDuplicates} duplicates skipped).`
+    );
+    setTimeout(() => setSyncMessage(null), 4000);
+    QueueStore.getQueueState().then(setQueueState);
   };
 
   const handleStartQueue = async () => {
@@ -275,17 +342,111 @@ export const PopupView: React.FC<PopupViewProps> = ({
 
   const handleRemoveJob = async (jobId: string) => {
     await QueueStore.removeJob(jobId);
+    setSelectedJobIds((prev) => prev.filter((id) => id !== jobId));
   };
 
   const handleClearCompleted = async () => {
     await QueueStore.clearCompleted();
+    setSelectedJobIds([]);
   };
 
   const handleClearAll = async () => {
     await QueueStore.clearAll();
+    setSelectedJobIds([]);
   };
 
-  // Counts
+  // Selection Handlers (Phase 7)
+  const handleToggleSelectJob = (jobId: string) => {
+    setSelectedJobIds((prev) =>
+      prev.includes(jobId) ? prev.filter((id) => id !== jobId) : [...prev, jobId]
+    );
+  };
+
+  const handleToggleSelectAllVisible = () => {
+    if (isAllVisibleSelected) {
+      // Unselect only visible jobs
+      setSelectedJobIds((prev) => prev.filter((id) => !visibleJobIds.includes(id)));
+    } else {
+      // Select all visible jobs
+      setSelectedJobIds((prev) => Array.from(new Set([...prev, ...visibleJobIds])));
+    }
+  };
+
+  const handleClearSelection = () => {
+    setSelectedJobIds([]);
+  };
+
+  // Bulk Actions Handlers (Phase 8)
+  const handleRetrySelected = async () => {
+    setIsBulkProcessing(true);
+    try {
+      const res = await BulkPlanner.retrySelectedJobs(selectedJobIds, queueState.jobs);
+      const updatedState = await QueueStore.getQueueState();
+      setQueueState(updatedState);
+      setSyncMessage(`Retried ${res.retriedCount} failed jobs.`);
+      setTimeout(() => setSyncMessage(null), 3000);
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  const handleRemoveSelected = async () => {
+    setIsBulkProcessing(true);
+    try {
+      const res = await BulkPlanner.removeSelectedJobs(
+        selectedJobIds,
+        queueState.activeJobId,
+        false
+      );
+      const updatedState = await QueueStore.getQueueState();
+      setQueueState(updatedState);
+      setSelectedJobIds([]);
+      if (res.skippedActiveCount > 0) {
+        setSyncMessage(
+          `Removed ${res.removedCount} jobs (${res.skippedActiveCount} active job protected).`
+        );
+      } else {
+        setSyncMessage(`Removed ${res.removedCount} jobs.`);
+      }
+      setTimeout(() => setSyncMessage(null), 3000);
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  const handleSyncSelected = async () => {
+    if (!syncEngine.isRootReady()) {
+      setSyncMessage('Please select Local Storage Root first.');
+      setTimeout(() => setSyncMessage(null), 3000);
+      return;
+    }
+    setIsBulkProcessing(true);
+    try {
+      const res = await BulkPlanner.syncSelectedJobs(
+        selectedJobIds,
+        queueState.jobs,
+        syncEngine
+      );
+      const updatedState = await QueueStore.getQueueState();
+      setQueueState(updatedState);
+      setSyncMessage(`Bulk synced ${res.syncedCount} of ${syncableCount} selected jobs.`);
+      setTimeout(() => setSyncMessage(null), 3500);
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  const handleResetFilters = () => {
+    setFilterState({
+      status: 'ALL',
+      returnType: 'ALL',
+      financialYear: 'ALL',
+      gstin: 'ALL',
+      searchQuery: '',
+    });
+  };
+
+  // Counts for quick display
   const totalJobs = queueState.jobs.length;
   const pendingJobs = queueState.jobs.filter((j) => j.status === 'PENDING').length;
   const inProgressJobs = queueState.jobs.filter(
@@ -305,7 +466,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
     switch (status) {
       case 'DOWNLOADED':
         return (
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/80">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/80">
             <CheckCircle2 className="w-3 h-3 text-emerald-600" />
             DOWNLOADED
           </span>
@@ -315,14 +476,14 @@ export const PopupView: React.FC<PopupViewProps> = ({
       case 'GENERATING':
       case 'WAITING_FOR_DOWNLOAD':
         return (
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200/80 animate-pulse">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200/80 animate-pulse">
             <RefreshCw className="w-3 h-3 animate-spin text-blue-600" />
             {status}
           </span>
         );
       case 'FAILED':
         return (
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200/80">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 text-rose-700 border border-rose-200/80">
             <AlertCircle className="w-3 h-3 text-rose-600" />
             FAILED
           </span>
@@ -330,7 +491,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
       case 'PENDING':
       default:
         return (
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200/60">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200/60">
             <Clock className="w-3 h-3 text-slate-400" />
             PENDING
           </span>
@@ -378,7 +539,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
         isStandalone ? 'max-w-md mx-auto min-h-screen bg-slate-50 shadow-2xl' : 'h-full'
       } flex flex-col bg-slate-50 text-slate-900 font-sans select-none`}
     >
-      {/* Clean Minimalist Header */}
+      {/* Header */}
       <header className="px-4 py-3.5 bg-white border-b border-slate-200 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-sm shadow-sm">
@@ -390,26 +551,47 @@ export const PopupView: React.FC<PopupViewProps> = ({
                 Udaan GST Bulk
               </h1>
               <span className="text-[10px] font-semibold px-1.5 py-0.5 bg-blue-50 text-blue-700 rounded-md border border-blue-200/60">
-                M3
+                M6
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 mt-0.5">Sequential Queue & Local Auto-Sync</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Reliability, Diagnostics & Recovery</p>
           </div>
         </div>
 
-        <button
-          id="btn-toggle-logs"
-          onClick={() => setShowLogs(!showLogs)}
-          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border ${
-            showLogs
-              ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-              : 'text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
-          }`}
-          title="Toggle Extension Event Logs"
-        >
-          <Terminal className="w-3.5 h-3.5" />
-          <span className="text-[11px] font-medium">Logs</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            id="btn-open-diagnostics"
+            onClick={() => setShowDiagnosticsModal(true)}
+            className="px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border text-indigo-700 bg-indigo-50 border-indigo-200 hover:bg-indigo-100"
+            title="Open System Diagnostics & Health"
+          >
+            <Activity className="w-3.5 h-3.5 text-indigo-600" />
+            <span className="text-[11px] font-semibold">Diagnostics</span>
+          </button>
+
+          <button
+            id="btn-open-backup"
+            onClick={() => setShowBackupModal(true)}
+            className="px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border text-slate-700 bg-slate-100 border-slate-200 hover:bg-slate-200"
+            title="Export or Restore Queue Backup"
+          >
+            <HardDriveDownload className="w-3.5 h-3.5 text-slate-600" />
+            <span className="text-[11px]">Backup</span>
+          </button>
+
+          <button
+            id="btn-toggle-logs"
+            onClick={() => setShowLogs(!showLogs)}
+            className={`px-2 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors border ${
+              showLogs
+                ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                : 'text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
+            }`}
+            title="Toggle Extension Event Logs"
+          >
+            <Terminal className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </header>
 
       {/* Main Content Body */}
@@ -463,7 +645,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
             </div>
           </div>
 
-          {/* Contextual Warning / Guidance */}
+          {/* Guidance */}
           {!portalStatus.isGSTPortal && (
             <div className="text-xs text-slate-600 bg-amber-50/70 border border-amber-200/70 p-2.5 rounded-lg flex items-center justify-between gap-2">
               <span className="text-[11px] leading-tight">Open the official GST Portal to start operations.</span>
@@ -488,36 +670,10 @@ export const PopupView: React.FC<PopupViewProps> = ({
               </p>
             </div>
           )}
-
-          {portalStatus.isGSTPortal && portalStatus.isLoggedIn && !portalStatus.isReturnsDashboard && (
-            <div className="text-xs text-blue-900 bg-blue-50 border border-blue-200 p-2.5 rounded-lg">
-              <span className="text-[11px]">Logged in. Please navigate to <strong>Returns Dashboard</strong> to initiate batch downloads.</span>
-            </div>
-          )}
         </section>
 
-        {/* Queue Metrics Summary */}
-        <section
-          id="queue-metrics-bar"
-          className="grid grid-cols-4 gap-2 bg-white p-2.5 rounded-xl border border-slate-200 text-center shadow-sm"
-        >
-          <div className="p-2 rounded-lg bg-slate-50 border border-slate-100">
-            <span className="block text-sm font-semibold text-slate-900">{totalJobs}</span>
-            <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Total</span>
-          </div>
-          <div className="p-2 rounded-lg bg-amber-50/80 border border-amber-100">
-            <span className="block text-sm font-semibold text-amber-700">{pendingJobs}</span>
-            <span className="text-[10px] uppercase tracking-wider text-amber-600 font-semibold">Pending</span>
-          </div>
-          <div className="p-2 rounded-lg bg-blue-50/80 border border-blue-100">
-            <span className="block text-sm font-semibold text-blue-700">{inProgressJobs}</span>
-            <span className="text-[10px] uppercase tracking-wider text-blue-600 font-semibold">Active</span>
-          </div>
-          <div className="p-2 rounded-lg bg-emerald-50/80 border border-emerald-100">
-            <span className="block text-sm font-semibold text-emerald-700">{downloadedJobs}</span>
-            <span className="text-[10px] uppercase tracking-wider text-emerald-600 font-semibold">Done</span>
-          </div>
-        </section>
+        {/* Milestone 5: Compact Queue Summary Bar (Phase 9) */}
+        <QueueSummaryBar jobs={queueState.jobs} activeJobId={queueState.activeJobId} />
 
         {/* Milestone 3: Local Storage & Auto-Sync Section */}
         <section
@@ -661,7 +817,8 @@ export const PopupView: React.FC<PopupViewProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {/* Start / Pause / Resume */}
             {!queueState.isRunning ? (
               <button
                 id="btn-start-queue"
@@ -692,21 +849,33 @@ export const PopupView: React.FC<PopupViewProps> = ({
               </button>
             )}
 
-            <div className="flex gap-1.5">
+            {/* Bulk Planner Button (Milestone 5) */}
+            <button
+              id="btn-open-bulk-planner"
+              onClick={() => setShowBulkPlanner(true)}
+              className="flex items-center justify-center gap-1.5 py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors"
+              title="Open Bulk Job Planner"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Bulk Planner</span>
+            </button>
+
+            {/* Quick Add Single Job */}
+            <div className="flex gap-1">
               <button
                 id="btn-add-test-job-quick"
                 onClick={handleAddDefaultTestJob}
-                className="flex-1 flex items-center justify-center gap-1 py-2 px-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-medium shadow-sm transition-colors"
-                title="Add Default Safe Test Job (TESTGSTIN / April / GSTR-2B)"
+                className="flex-1 flex items-center justify-center gap-1 py-2 px-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-medium shadow-sm transition-colors truncate"
+                title="Add Default Test Job"
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add Job</span>
+                <Plus className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Add Job</span>
               </button>
               <button
                 id="btn-customize-job"
                 onClick={() => setShowAddModal(true)}
-                className="px-2.5 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-medium transition-colors"
-                title="Customize Test Job Parameters"
+                className="px-2 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-medium transition-colors"
+                title="Custom Single Job"
               >
                 <Sparkles className="w-3.5 h-3.5" />
               </button>
@@ -733,6 +902,14 @@ export const PopupView: React.FC<PopupViewProps> = ({
           </div>
         </section>
 
+        {/* Milestone 5: Bulk Job Planner Modal */}
+        <BulkJobPlannerModal
+          isOpen={showBulkPlanner}
+          onClose={() => setShowBulkPlanner(false)}
+          existingJobs={queueState.jobs}
+          onBulkCreated={handleBulkCreated}
+        />
+
         {/* Custom Test Job Modal */}
         {showAddModal && (
           <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
@@ -757,7 +934,7 @@ export const PopupView: React.FC<PopupViewProps> = ({
                     value={testGstin}
                     onChange={(e) => setTestGstin(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-100 border-none rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-blue-500"
-                    placeholder="TESTGSTIN"
+                    placeholder="27AABCU9603R1ZM"
                     required
                   />
                 </div>
@@ -881,11 +1058,33 @@ export const PopupView: React.FC<PopupViewProps> = ({
           </section>
         )}
 
+        {/* Milestone 5: Filter Bar & Selection Bulk Actions */}
+        <QueueFilterAndActions
+          filters={filterState}
+          onFilterChange={setFilterState}
+          onResetFilters={handleResetFilters}
+          availableGstins={availableGstins}
+          availableFinancialYears={availableFinancialYears}
+          totalJobsCount={totalJobs}
+          visibleJobsCount={visibleJobs.length}
+          selectedJobIds={selectedJobIds}
+          onToggleSelectAllVisible={handleToggleSelectAllVisible}
+          onClearSelection={handleClearSelection}
+          isAllVisibleSelected={isAllVisibleSelected}
+          onRetrySelected={handleRetrySelected}
+          onRemoveSelected={handleRemoveSelected}
+          onSyncSelected={handleSyncSelected}
+          isRetrying={isBulkProcessing}
+          isSyncing={isBulkProcessing}
+          retryableCount={retryableCount}
+          syncableCount={syncableCount}
+        />
+
         {/* Job Queue List */}
         <section id="job-queue-list" className="space-y-2.5">
           <div className="flex items-center justify-between px-0.5">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Download Queue ({totalJobs})
+              Download Queue ({visibleJobs.length})
             </span>
             {inProgressJobs > 0 && (
               <span className="text-[11px] text-blue-600 font-medium">
@@ -899,160 +1098,234 @@ export const PopupView: React.FC<PopupViewProps> = ({
               <FileCheck className="w-8 h-8 text-slate-300 mx-auto mb-2" />
               <p className="text-xs font-semibold text-slate-800">Queue is currently empty</p>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                Add a test job to simulate sequential processing and download tracking.
+                Use the Bulk Job Planner or add single jobs to process returns sequentially.
+              </p>
+              <div className="mt-3.5 flex justify-center gap-2">
+                <button
+                  onClick={() => setShowBulkPlanner(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold transition-colors"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Open Bulk Planner</span>
+                </button>
+                <button
+                  onClick={handleAddDefaultTestJob}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-medium transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Single Job</span>
+                </button>
+              </div>
+            </div>
+          ) : visibleJobs.length === 0 ? (
+            <div className="bg-white rounded-xl p-5 text-center border border-slate-200 shadow-sm space-y-2">
+              <p className="text-xs font-semibold text-slate-700">No jobs match active filters</p>
+              <p className="text-[11px] text-slate-400">
+                Try adjusting your search query, status, return type, FY, or GSTIN filters.
               </p>
               <button
-                onClick={handleAddDefaultTestJob}
-                className="mt-3.5 inline-flex items-center gap-1.5 px-3.5 py-1.5 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-medium transition-colors"
+                onClick={handleResetFilters}
+                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add Test Job</span>
+                Reset Filters
               </button>
             </div>
           ) : (
             <div className="space-y-2.5">
-              {queueState.jobs.map((job) => (
-                <div
-                  key={job.id}
-                  id={`job-card-${job.id}`}
-                  className={`bg-white rounded-xl p-3.5 border transition-all ${
-                    queueState.activeJobId === job.id
-                      ? 'border-blue-500 shadow-sm ring-2 ring-blue-50'
-                      : 'border-slate-200 shadow-sm'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 font-mono text-[10px] font-bold border border-slate-200/60">
-                          {job.returnType}
-                        </span>
-                        <span className="text-xs font-semibold text-slate-900 font-mono">
-                          {job.gstin}
-                        </span>
-                        {job.isTestJob && (
-                          <span className="text-[10px] font-semibold px-1.5 py-0.5 bg-amber-50 text-amber-700 border border-amber-200/60 rounded">
-                            TEST JOB
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-slate-500 mt-1">
-                        {job.period} • {job.financialYear}
-                      </p>
-                    </div>
+              {visibleJobs.map((job) => {
+                const isSelected = selectedJobIds.includes(job.id);
+                return (
+                  <div
+                    key={job.id}
+                    id={`job-card-${job.id}`}
+                    className={`bg-white rounded-xl p-3.5 border transition-all ${
+                      isSelected
+                        ? 'ring-2 ring-blue-500 border-blue-500 bg-blue-50/20 shadow-sm'
+                        : queueState.activeJobId === job.id
+                        ? 'border-blue-500 shadow-sm ring-2 ring-blue-50'
+                        : 'border-slate-200 shadow-sm hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      {/* Selection Checkbox & Identity */}
+                      <div className="flex items-start gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSelectJob(job.id)}
+                          className="mt-0.5 text-slate-400 hover:text-blue-600 transition-colors"
+                          title={isSelected ? 'Deselect job' : 'Select job'}
+                        >
+                          {isSelected ? (
+                            <CheckSquare className="w-4 h-4 text-blue-600" />
+                          ) : (
+                            <Square className="w-4 h-4 text-slate-300" />
+                          )}
+                        </button>
 
-                    <div className="flex flex-col items-end gap-1">
-                      {getStatusBadge(job.status)}
-                      <span className="text-[10px] text-slate-400">
-                        {formatTimestamp(job.updatedAt)}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Active Job Step Indicator */}
-                  {(job.status === 'NAVIGATING' ||
-                    job.status === 'PAGE_READY' ||
-                    job.status === 'WAITING_FOR_DOWNLOAD') && (
-                    <div className="mt-2.5 pt-2.5 border-t border-slate-100">
-                      <div className="flex items-center justify-between text-[10px] text-slate-600 mb-1">
-                        <span className="font-medium">Sequential Step Execution</span>
-                        <span className="font-mono text-blue-600">{job.status}</span>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                        <div
-                          className="bg-blue-600 h-1.5 rounded-full transition-all duration-500"
-                          style={{
-                            width:
-                              job.status === 'NAVIGATING'
-                                ? '33%'
-                                : job.status === 'PAGE_READY'
-                                ? '66%'
-                                : '90%',
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Download Details & Milestone 3 Local Sync Status */}
-                  {job.status === 'DOWNLOADED' && (
-                    <div className="mt-2.5 pt-2.5 border-t border-slate-100 space-y-2">
-                      <div className="text-[11px] text-emerald-800 bg-emerald-50/70 p-2.5 rounded-lg flex items-center justify-between">
-                        <div className="truncate mr-2">
-                          <span className="font-medium text-emerald-950">Portal File: </span>
-                          <span className="font-mono text-[10.5px]">{job.filename || 'Downloaded JSON'}</span>
-                        </div>
-                        <FileCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                      </div>
-
-                      {/* Local Sync State Card */}
-                      <div className="bg-slate-50 border border-slate-200/70 rounded-lg p-2.5 text-[11px] space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-slate-700 flex items-center gap-1">
-                            <FolderSync className="w-3 h-3 text-slate-500" />
-                            Local Auto-Sync
-                          </span>
-                          {getSyncBadge(job.syncStatus)}
-                        </div>
-
-                        {job.syncStatus === 'SYNCED' && job.localRelativePath && (
-                          <div className="text-[10px] text-slate-600 bg-white p-1.5 rounded border border-slate-200 font-mono truncate">
-                            {job.localRelativePath}
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 font-mono text-[10px] font-bold border border-slate-200/60">
+                              {job.returnType}
+                            </span>
+                            <span className="text-xs font-semibold text-slate-900 font-mono">
+                              {job.gstin}
+                            </span>
+                            {job.companyName && (
+                              <span className="text-[10px] text-slate-500 font-medium truncate max-w-[100px]">
+                                ({job.companyName})
+                              </span>
+                            )}
+                            {job.isTestJob && (
+                              <span className="text-[9.5px] font-semibold px-1.5 py-0.5 bg-amber-50 text-amber-700 border border-amber-200/60 rounded">
+                                TEST
+                              </span>
+                            )}
                           </div>
-                        )}
+                          <p className="text-[11px] text-slate-500 mt-1">
+                            {job.period} • {job.financialYear}
+                          </p>
+                        </div>
+                      </div>
 
-                        {job.syncStatus === 'SYNC_FAILED' && (
-                          <div className="text-[10.5px] text-rose-700 bg-rose-50 p-1.5 rounded border border-rose-200">
-                            {job.syncError || 'Sync failed'}
+                      <div className="flex flex-col items-end gap-1">
+                        {getStatusBadge(job.status)}
+                        <span className="text-[10px] text-slate-400">
+                          {formatTimestamp(job.updatedAt)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Active Job Step Indicator */}
+                    {(job.status === 'NAVIGATING' ||
+                      job.status === 'PAGE_READY' ||
+                      job.status === 'WAITING_FOR_DOWNLOAD') && (
+                      <div className="mt-2.5 pt-2.5 border-t border-slate-100">
+                        <div className="flex items-center justify-between text-[10px] text-slate-600 mb-1">
+                          <span className="font-medium">Sequential Step Execution</span>
+                          <span className="font-mono text-blue-600">{job.status}</span>
+                        </div>
+                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-500"
+                            style={{
+                              width:
+                                job.status === 'NAVIGATING'
+                                  ? '33%'
+                                  : job.status === 'PAGE_READY'
+                                  ? '66%'
+                                  : '90%',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Download Details & Milestone 3 Local Sync Status */}
+                    {job.status === 'DOWNLOADED' && (
+                      <div className="mt-2.5 pt-2.5 border-t border-slate-100 space-y-2">
+                        <div className="text-[11px] text-emerald-800 bg-emerald-50/70 p-2.5 rounded-lg flex items-center justify-between">
+                          <div className="truncate mr-2">
+                            <span className="font-medium text-emerald-950">Portal File: </span>
+                            <span className="font-mono text-[10.5px]">
+                              {job.filename || 'Downloaded JSON'}
+                            </span>
                           </div>
-                        )}
+                          <FileCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                        </div>
 
-                        {job.syncStatus !== 'SYNCED' && syncSettings.status === 'CONNECTED' && (
-                          <div className="pt-1 flex justify-end">
+                        {/* Local Sync State Card */}
+                        <div className="bg-slate-50 border border-slate-200/70 rounded-lg p-2.5 text-[11px] space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium text-slate-700 flex items-center gap-1">
+                              <FolderSync className="w-3 h-3 text-slate-500" />
+                              Local Auto-Sync
+                            </span>
+                            {getSyncBadge(job.syncStatus)}
+                          </div>
+
+                          {job.syncStatus === 'SYNCED' && job.localRelativePath && (
+                            <div className="text-[10px] text-slate-600 bg-white p-1.5 rounded border border-slate-200 font-mono truncate">
+                              {job.localRelativePath}
+                            </div>
+                          )}
+
+                          {job.syncStatus === 'SYNC_FAILED' && (
+                            <div className="text-[10.5px] text-rose-700 bg-rose-50 p-1.5 rounded border border-rose-200">
+                              {job.syncError || 'Sync failed'}
+                            </div>
+                          )}
+
+                          {job.syncStatus !== 'SYNCED' && syncSettings.status === 'CONNECTED' && (
+                            <div className="pt-1 flex justify-end">
+                              <button
+                                onClick={() => handleSyncSingleJob(job)}
+                                className="px-2 py-1 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded text-[10px] font-medium transition-colors"
+                              >
+                                Sync Now
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Error & Retry Details */}
+                    {job.status === 'FAILED' && (
+                      <div className="mt-2.5 pt-2.5 border-t border-slate-100 text-[11px] text-rose-800 bg-rose-50/80 p-2.5 rounded-lg space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="space-y-0.5 flex-1">
+                            <p className="font-medium text-rose-950">{job.lastErrorMessage || job.error || 'Operation failed'}</p>
+                            {job.lastErrorCode && (
+                              <span className="inline-block font-mono text-[9.5px] px-1.5 py-0.2 bg-rose-200 text-rose-900 rounded font-semibold">
+                                {job.lastErrorCode}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between pt-1">
+                          <span className="text-[10px] text-rose-600 font-medium">
+                            Attempts: {job.retryCount}/{job.maxRetries}
+                          </span>
+                          <div className="flex items-center gap-1.5">
                             <button
-                              onClick={() => handleSyncSingleJob(job)}
-                              className="px-2 py-1 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded text-[10px] font-medium transition-colors"
+                              onClick={() => setSelectedJobForDetails(job)}
+                              className="px-2 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded text-[10px] font-medium transition-colors"
                             >
-                              Sync Now
+                              View Details
+                            </button>
+                            <button
+                              onClick={() => handleRetryJob(job.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-medium transition-colors shadow-xs"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Retry</span>
                             </button>
                           </div>
-                        )}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    )}
 
-                  {/* Error & Retry Details */}
-                  {job.status === 'FAILED' && (
-                    <div className="mt-2.5 pt-2.5 border-t border-slate-100 text-[11px] text-rose-800 bg-rose-50/80 p-2.5 rounded-lg space-y-2">
-                      <p className="font-medium">{job.error || 'Operation failed'}</p>
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-rose-600">
-                          Attempts: {job.retryCount}/{job.maxRetries}
-                        </span>
-                        <button
-                          onClick={() => handleRetryJob(job.id)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-medium transition-colors shadow-xs"
-                        >
-                          <RotateCcw className="w-3 h-3" />
-                          <span>Retry</span>
-                        </button>
-                      </div>
+                    {/* Actions for Idle / Pending */}
+                    <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
+                      <button
+                        onClick={() => setSelectedJobForDetails(job)}
+                        className="text-slate-400 hover:text-slate-700 font-mono text-[10px] flex items-center gap-1"
+                        title="View Job History Timeline"
+                      >
+                        <Info className="w-3 h-3 text-slate-400" />
+                        <span>ID: {job.id.slice(0, 14)}...</span>
+                      </button>
+                      <button
+                        onClick={() => handleRemoveJob(job.id)}
+                        className="text-xs font-semibold text-slate-400 hover:text-red-500 transition-colors"
+                        title="Remove Job"
+                      >
+                        Remove
+                      </button>
                     </div>
-                  )}
-
-                  {/* Actions for Idle / Pending */}
-                  <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400 font-mono text-[10px]">ID: {job.id}</span>
-                    <button
-                      onClick={() => handleRemoveJob(job.id)}
-                      className="text-xs font-semibold text-slate-400 hover:text-red-500 transition-colors"
-                      title="Remove Job"
-                    >
-                      Remove
-                    </button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>
@@ -1065,6 +1338,43 @@ export const PopupView: React.FC<PopupViewProps> = ({
           <strong>Zero-Knowledge Security:</strong> Passwords, OTPs, or session tokens are never intercepted or stored.
         </span>
       </footer>
+
+      {/* Milestone 6 Modals */}
+      <DiagnosticsModal
+        isOpen={showDiagnosticsModal}
+        onClose={() => setShowDiagnosticsModal(false)}
+        queueState={queueState}
+        syncSettings={syncSettings}
+      />
+
+      <BackupRestoreModal
+        isOpen={showBackupModal}
+        onClose={() => setShowBackupModal(false)}
+        queueState={queueState}
+        onRestoreComplete={async () => {
+          const fresh = await QueueStore.getQueueState();
+          setQueueState(fresh);
+          setShowBackupModal(false);
+          setSyncMessage('Backup restored successfully.');
+          setTimeout(() => setSyncMessage(null), 3000);
+        }}
+      />
+
+      <JobDetailsModal
+        job={selectedJobForDetails}
+        isOpen={!!selectedJobForDetails}
+        onClose={() => setSelectedJobForDetails(null)}
+        onRetry={async (id) => {
+          await handleRetryJob(id);
+          const fresh = await QueueStore.getQueueState();
+          setQueueState(fresh);
+        }}
+        onRemove={async (id) => {
+          await handleRemoveJob(id);
+          const fresh = await QueueStore.getQueueState();
+          setQueueState(fresh);
+        }}
+      />
     </div>
   );
 };

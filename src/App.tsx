@@ -45,7 +45,7 @@ export default function App() {
   // Acceptance Tests state
   const [testResults, setTestResults] = useState<TestCaseResult[]>([]);
   const [isRunningTests, setIsRunningTests] = useState(false);
-  const [testProgress, setTestProgress] = useState({ current: 0, total: 75 });
+  const [testProgress, setTestProgress] = useState({ current: 0, total: 101 });
 
   // Downloads simulator state
   const [simulatedDownloads, setSimulatedDownloads] = useState<
@@ -76,7 +76,7 @@ export default function App() {
   const handleRunTests = async () => {
     setIsRunningTests(true);
     setTestResults([]);
-    setTestProgress({ current: 0, total: 75 });
+    setTestProgress({ current: 0, total: 101 });
 
     const results = await runAcceptanceTestSuite((res, cur, tot) => {
       setTestResults((prev) => [...prev, res]);
@@ -115,7 +115,7 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'udaan-gst-bulk-download-extension-m4.zip';
+      a.download = 'udaan-gst-bulk-download-extension-m5.zip';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -145,7 +145,7 @@ export default function App() {
                 Udaan GST Bulk Download Assistant
               </h1>
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200/60">
-                Milestone 4 • Multi-Return (GSTR-1, 2A, 2B, 3B)
+                Milestone 5 • Bulk Job Planner & Advanced Queue Operations
               </span>
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/60 flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5" />
@@ -153,7 +153,7 @@ export default function App() {
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Manifest V3 Chrome Extension • Sequential Queue • Multi-Return Automation • Local Storage Auto-Sync
+              Manifest V3 Chrome Extension • Bulk Planner • Multi-Return (GSTR-1, 2A, 2B, 3B) • Local Auto-Sync
             </p>
           </div>
         </div>
@@ -476,9 +476,9 @@ export default function App() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-base font-semibold text-slate-900">Milestone 1, 2 & 3 Acceptance Test Suite</h2>
+                    <h2 className="text-base font-semibold text-slate-900">Milestone 1–5 Acceptance Test Suite</h2>
                     <p className="text-xs text-slate-500 mt-1">
-                      Executes 55 comprehensive tests across queue, retry accounting, GSTR-2B automation, and Milestone 3 Local Auto-Sync.
+                      Executes 101 comprehensive tests across portal detection, sequential queue, GSTR-1/2A/2B/3B adapters, local storage auto-sync, and M5 bulk planner with advanced queue operations.
                     </p>
                   </div>
 
@@ -493,7 +493,7 @@ export default function App() {
                     ) : (
                       <Play className="w-3.5 h-3.5" />
                     )}
-                    <span>{isRunningTests ? `Running (${testProgress.current}/${testProgress.total})...` : 'Run All 55 Tests'}</span>
+                    <span>{isRunningTests ? `Running (${testProgress.current}/${testProgress.total})...` : 'Run All 101 Tests'}</span>
                   </button>
                 </div>
 
@@ -506,7 +506,7 @@ export default function App() {
                       </span>
                     </div>
                     <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-full">
-                      {passedTestsCount === testResults.length ? '100% Milestone 1, 2 & 3 Compliance (55/55)' : 'Tests in Progress'}
+                      {passedTestsCount === testResults.length ? '100% Milestone 1–5 Compliance (101/101)' : 'Tests in Progress'}
                     </span>
                   </div>
                 )}
@@ -518,7 +518,7 @@ export default function App() {
                       <CheckCircle2 className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                       <p className="text-xs font-semibold text-slate-700">No test runs executed yet</p>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        Click "Run All 55 Tests" to perform live verification across all subsystems.
+                        Click "Run All 101 Tests" to perform live verification across all subsystems.
                       </p>
                     </div>
                   ) : (

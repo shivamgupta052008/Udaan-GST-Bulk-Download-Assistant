@@ -7,6 +7,9 @@ import { Logger } from '../shared/logger';
 import { sleep } from '../shared/utils';
 import { QUEUE_CONFIG } from '../shared/constants';
 import { SyncEngine } from '../sync/syncEngine';
+import { classifyError, GstErrorCode } from '../diagnostics/errorClassification';
+import { DiagnosticLogger } from '../diagnostics/diagnosticLogger';
+import { QueueIntegrityValidator } from '../diagnostics/queueIntegrity';
 
 export class DownloadQueueManager {
   private static instance: DownloadQueueManager | null = null;
@@ -39,12 +42,18 @@ export class DownloadQueueManager {
 
       if (download.state === 'complete') {
         Logger.info(`[Queue] Download verified complete for job ${job.id} (${download.filename})`);
+        DiagnosticLogger.info('Queue', 'DOWNLOAD_VERIFIED', `Download verified complete for job ${job.id}`, {
+          jobId: job.id,
+        });
+
         await QueueStore.updateJob(job.id, {
           status: 'DOWNLOADED',
           browserDownloadId: download.id,
           filename: download.filename,
           completedAt: Date.now(),
           error: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
         });
 
         await QueueStore.updateQueueState({ activeJobId: null });
@@ -66,7 +75,11 @@ export class DownloadQueueManager {
         }
       } else if (download.state === 'interrupted') {
         Logger.warn(`[Queue] Download interrupted for job ${job.id}: ${download.error}`);
-        await this.handleJobFailure(job, download.error || 'Download was interrupted');
+        DiagnosticLogger.warn('Queue', 'DOWNLOAD_INTERRUPTED', `Download interrupted: ${download.error}`, {
+          jobId: job.id,
+          errorCode: 'DOWNLOAD_INTERRUPTED',
+        });
+        await this.handleJobFailure(job, download.error || 'Download was interrupted', 'DOWNLOAD_INTERRUPTED');
       }
     });
   }
@@ -76,9 +89,12 @@ export class DownloadQueueManager {
    */
   public async recoverQueueOnStartup(): Promise<void> {
     Logger.info('[Queue Recovery] Running startup reconciliation and recovery check...');
+    DiagnosticLogger.info('Queue', 'STARTUP_RECOVERY', 'Running startup recovery and queue reconciliation');
     await this.downloadMonitor.init();
 
-    const state = await QueueStore.getQueueState();
+    const rawState = await QueueStore.getQueueState();
+    const { repairedState } = QueueIntegrityValidator.repair(rawState);
+    const state = repairedState;
     let hasModifications = false;
 
     // Check all jobs for interrupted or unfinalized states
@@ -92,12 +108,16 @@ export class DownloadQueueManager {
           job.filename = dl.filename;
           job.completedAt = Date.now();
           job.error = null;
+          job.lastErrorCode = null;
           hasModifications = true;
         } else if (dl && dl.state === 'interrupted') {
           Logger.warn(`[Queue Recovery] Reconciled interrupted download for job ${job.id}`);
           job.status = 'PENDING';
           job.retryCount = (job.retryCount || 0) + 1;
           job.error = 'Interrupted during restart. Retry scheduled.';
+          job.lastErrorCode = 'DOWNLOAD_INTERRUPTED';
+          job.lastErrorMessage = job.error;
+          job.lastErrorAt = Date.now();
           hasModifications = true;
         } else {
           // Download did not start or was lost
@@ -121,7 +141,7 @@ export class DownloadQueueManager {
       hasModifications = true;
     }
 
-    if (hasModifications) {
+    if (hasModifications || repairedState !== rawState) {
       await QueueStore.saveQueueState(state);
       await this.notifyState();
     }
@@ -449,7 +469,8 @@ export class DownloadQueueManager {
 
   public async handleJobFailure(
     jobOrId: QueueJob | string,
-    errorMsg: string
+    errorMsg: string,
+    forcedErrorCode?: GstErrorCode
   ): Promise<QueueJob | null> {
     const jobId = typeof jobOrId === 'string' ? jobOrId : jobOrId.id;
     const freshJobs = await QueueStore.getQueue();
@@ -462,6 +483,7 @@ export class DownloadQueueManager {
       return null;
     }
 
+    const classified = classifyError(errorMsg, forcedErrorCode || 'UNKNOWN_ERROR', jobId);
     const currentRetries = (existingJob.retryCount || 0) + 1;
     const maxRetries = existingJob.maxRetries || QUEUE_CONFIG.MAX_RETRIES;
 
@@ -469,21 +491,39 @@ export class DownloadQueueManager {
 
     if (currentRetries >= maxRetries) {
       Logger.warn(
-        `[Job Failed Permanently] Job ${jobId} reached max retries (${maxRetries}). Status: FAILED — Manual action required.`
+        `[Job Failed Permanently] Job ${jobId} reached max retries (${maxRetries}). Status: FAILED (${classified.code}) — Manual action required.`
       );
+      DiagnosticLogger.error('Queue', 'JOB_FAILED_PERMANENT', `Job ${jobId} failed permanently: ${classified.userMessage}`, {
+        jobId,
+        errorCode: classified.code,
+        data: { technicalDetail: classified.technicalDetail },
+      });
+
       updatedJob = await QueueStore.updateJob(jobId, {
         status: 'FAILED',
-        error: `FAILED — Manual action required (${errorMsg})`,
+        error: `FAILED — Manual action required (${classified.userMessage}: ${errorMsg})`,
+        lastErrorCode: classified.code,
+        lastErrorMessage: classified.userMessage,
+        lastErrorAt: Date.now(),
         retryCount: maxRetries,
         completedAt: Date.now(),
       });
     } else {
       Logger.warn(
-        `[Job Retry Scheduled] Job ${jobId} attempt ${currentRetries}/${maxRetries} failed: ${errorMsg}. Retrying...`
+        `[Job Retry Scheduled] Job ${jobId} attempt ${currentRetries}/${maxRetries} failed (${classified.code}): ${errorMsg}. Retrying...`
       );
+      DiagnosticLogger.warn('Queue', 'JOB_RETRY_SCHEDULED', `Job ${jobId} retry scheduled: ${classified.userMessage}`, {
+        jobId,
+        errorCode: classified.code,
+        data: { attempt: currentRetries, maxRetries },
+      });
+
       updatedJob = await QueueStore.updateJob(jobId, {
         status: 'PENDING',
-        error: `Attempt ${currentRetries} of ${maxRetries} failed: ${errorMsg} (Retry scheduled)`,
+        error: `Attempt ${currentRetries} of ${maxRetries} failed: ${classified.userMessage} (Retry scheduled)`,
+        lastErrorCode: classified.code,
+        lastErrorMessage: classified.userMessage,
+        lastErrorAt: Date.now(),
         retryCount: currentRetries,
       });
     }

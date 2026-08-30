@@ -1,7 +1,9 @@
 import { FinancialYear, ReturnPeriod, ReturnType } from '../gst/returnTypes';
 import { SyncStatus } from '../sync/syncTypes';
+import { GstErrorCode } from '../diagnostics/errorClassification';
 
 export type { SyncStatus };
+export type { GstErrorCode };
 
 export type QueueStatus =
   | 'PENDING'
@@ -16,6 +18,13 @@ export type QueueStatus =
   | 'PAUSED'
   | 'FAILED'
   | 'CANCELLED';
+
+export interface JobHistoryEvent {
+  timestamp: number;
+  status: QueueStatus;
+  errorCode?: GstErrorCode | null;
+  message?: string | null;
+}
 
 export interface QueueJob {
   id: string;
@@ -43,6 +52,12 @@ export interface QueueJob {
   syncedAt?: number | null;
   companyName?: string | null;
   downloadContent?: string | null;
+
+  // Milestone 6: Diagnostic & Reliability properties
+  lastErrorCode?: GstErrorCode | null;
+  lastErrorMessage?: string | null;
+  lastErrorAt?: number | null;
+  history?: JobHistoryEvent[];
 }
 
 export interface QueueState {
@@ -52,3 +67,4 @@ export interface QueueState {
   activeJobId: string | null;
   lastUpdated: number;
 }
+

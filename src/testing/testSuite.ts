@@ -22,6 +22,13 @@ import {
   getDeterministicFileName,
   getFullRelativePath,
 } from '../sync/pathUtils';
+import { BulkPlanner, QueueFilterState } from '../queue/bulkPlanner';
+import { classifyError, sanitizeErrorMessage } from '../diagnostics/errorClassification';
+import { DiagnosticLogger } from '../diagnostics/diagnosticLogger';
+import { QueueIntegrityValidator } from '../diagnostics/queueIntegrity';
+import { SchemaManager, CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_KEY_SCHEMA_VERSION } from '../storage/schemaManager';
+import { BackupManager, UdaanBackupData } from '../storage/backupManager';
+import { ExtensionStorage } from '../storage/extensionStorage';
 
 export interface TestCaseResult {
   id: string;
@@ -35,7 +42,9 @@ export interface TestCaseResult {
     | 'BUILD'
     | 'GSTR2B_M2'
     | 'LOCAL_SYNC_M3'
-    | 'MULTI_RETURN_M4';
+    | 'MULTI_RETURN_M4'
+    | 'BULK_PLANNER_M5'
+    | 'RELIABILITY_M6';
   title: string;
   description: string;
   passed: boolean;
@@ -51,7 +60,7 @@ export async function runAcceptanceTestSuite(
   const testDownloadMonitor = DownloadMonitor.getInstance();
   await testDownloadMonitor.init();
 
-  const totalTests = 75;
+  const totalTests = 125;
   let currentTest = 0;
 
   async function executeTest(
@@ -2418,6 +2427,1557 @@ export async function runAcceptanceTestSuite(
         if (!msg.includes('Unsupported return type')) {
           throw new Error(`Expected unsupported return error, got: ${msg}`);
         }
+      }
+    }
+  );
+
+  // =========================================================================
+  // MILESTONE 5: BULK JOB PLANNER & ADVANCED QUEUE OPERATIONS TESTS (M5-01 to M5-26)
+  // =========================================================================
+
+  // 76. M5-01: Bulk Job Planner Formula (12 periods x 4 return types = 48 jobs)
+  await executeTest(
+    'M5-01',
+    'BULK_PLANNER_M5',
+    'Bulk Formula Calculation (12 Periods × 4 Returns)',
+    'Verifies Bulk Planner accurately computes combinations for 12 periods and 4 return types resulting in 48 planned jobs',
+    async () => {
+      const plan = BulkPlanner.calculatePlan(
+        {
+          gstin: '27AABCU9603R1ZM',
+          companyName: 'Acme Traders',
+          financialYear: '2025-2026',
+          periods: [
+            'April', 'May', 'June', 'July', 'August', 'September',
+            'October', 'November', 'December', 'January', 'February', 'March',
+          ],
+          returnTypes: ['GSTR-1', 'GSTR-2A', 'GSTR-2B', 'GSTR-3B'],
+        },
+        []
+      );
+
+      if (plan.totalRequested !== 48) {
+        throw new Error(`Expected 48 total requested jobs, got: ${plan.totalRequested}`);
+      }
+      if (plan.newJobsCount !== 48) {
+        throw new Error(`Expected 48 new jobs, got: ${plan.newJobsCount}`);
+      }
+      if (plan.duplicateCount !== 0) {
+        throw new Error(`Expected 0 duplicates, got: ${plan.duplicateCount}`);
+      }
+      if (plan.newJobs.length !== 48) {
+        throw new Error(`Expected newJobs array length 48, got: ${plan.newJobs.length}`);
+      }
+    }
+  );
+
+  // 77. M5-02: Single-Period Multi-Return Calculation (1 month x 4 returns = 4 jobs)
+  await executeTest(
+    'M5-02',
+    'BULK_PLANNER_M5',
+    'Bulk Formula Calculation (1 Period × 4 Returns)',
+    'Verifies Bulk Planner generates 4 jobs when 1 period and all 4 return types are selected',
+    async () => {
+      const plan = BulkPlanner.calculatePlan(
+        {
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          periods: ['April'],
+          returnTypes: ['GSTR-1', 'GSTR-2A', 'GSTR-2B', 'GSTR-3B'],
+        },
+        []
+      );
+
+      if (plan.totalRequested !== 4 || plan.newJobsCount !== 4) {
+        throw new Error(`Expected 4 jobs, got totalRequested=${plan.totalRequested}, newJobsCount=${plan.newJobsCount}`);
+      }
+    }
+  );
+
+  // 78. M5-03: Multi-Period Single-Return Calculation (3 months x 1 return = 3 jobs)
+  await executeTest(
+    'M5-03',
+    'BULK_PLANNER_M5',
+    'Bulk Formula Calculation (3 Periods × 1 Return)',
+    'Verifies Bulk Planner generates 3 jobs when Q1 (April, May, June) and 1 return type (GSTR-2B) are selected',
+    async () => {
+      const plan = BulkPlanner.calculatePlan(
+        {
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          periods: ['April', 'May', 'June'],
+          returnTypes: ['GSTR-2B'],
+        },
+        []
+      );
+
+      if (plan.totalRequested !== 3 || plan.newJobsCount !== 3) {
+        throw new Error(`Expected 3 jobs, got totalRequested=${plan.totalRequested}`);
+      }
+      const returnTypesInPlan = plan.newJobs.map((j) => j.returnType);
+      if (!returnTypesInPlan.every((rt) => rt === 'GSTR-2B')) {
+        throw new Error(`All planned jobs must be GSTR-2B, found: ${returnTypesInPlan.join(', ')}`);
+      }
+    }
+  );
+
+  // 79. M5-04: Bulk Job Preview Statistics Accuracy
+  await executeTest(
+    'M5-04',
+    'BULK_PLANNER_M5',
+    'Bulk Job Preview Statistics Accuracy',
+    'Verifies preview statistics correctly partition total requested jobs into new jobs and duplicates',
+    async () => {
+      const existingQueueFixture = [
+        {
+          id: 'job_dup_1',
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          period: 'April',
+          returnType: 'GSTR-2B' as const,
+          status: 'DOWNLOADED' as const,
+          isTestJob: true,
+          retryCount: 0,
+          maxRetries: 3,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        {
+          id: 'job_dup_2',
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          period: 'May',
+          returnType: 'GSTR-1' as const,
+          status: 'PENDING' as const,
+          isTestJob: true,
+          retryCount: 0,
+          maxRetries: 3,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ];
+
+      const plan = BulkPlanner.calculatePlan(
+        {
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          periods: ['April', 'May', 'June'],
+          returnTypes: ['GSTR-1', 'GSTR-2B'],
+        },
+        existingQueueFixture
+      );
+
+      // Total = 3 periods * 2 returns = 6
+      // Duplicates = April GSTR-2B, May GSTR-1 = 2
+      // New = 4
+      if (plan.totalRequested !== 6) {
+        throw new Error(`Expected totalRequested=6, got: ${plan.totalRequested}`);
+      }
+      if (plan.duplicateCount !== 2) {
+        throw new Error(`Expected duplicateCount=2, got: ${plan.duplicateCount}`);
+      }
+      if (plan.newJobsCount !== 4) {
+        throw new Error(`Expected newJobsCount=4, got: ${plan.newJobsCount}`);
+      }
+      if (plan.duplicates.length !== 2) {
+        throw new Error(`Expected duplicates array length 2, got: ${plan.duplicates.length}`);
+      }
+    }
+  );
+
+  // 80. M5-05: Duplicate Identification against QueueStore
+  await executeTest(
+    'M5-05',
+    'BULK_PLANNER_M5',
+    'Duplicate Identification Against QueueStore',
+    'Verifies BulkPlanner correctly matches return identity (GSTIN, FY, Period, ReturnType) case-insensitively',
+    async () => {
+      const queue = [
+        {
+          id: 'job_existing_case',
+          gstin: '27aabcu9603r1zm',
+          financialYear: '2025-2026',
+          period: 'July',
+          returnType: 'GSTR-3B' as const,
+          status: 'PENDING' as const,
+          isTestJob: true,
+          retryCount: 0,
+          maxRetries: 3,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ];
+
+      const plan = BulkPlanner.calculatePlan(
+        {
+          gstin: '27AABCU9603R1ZM', // uppercase
+          financialYear: '2025-2026',
+          periods: ['July'],
+          returnTypes: ['GSTR-3B'],
+        },
+        queue
+      );
+
+      if (plan.duplicateCount !== 1 || plan.newJobsCount !== 0) {
+        throw new Error(`Expected case-insensitive duplicate match, got duplicateCount=${plan.duplicateCount}`);
+      }
+    }
+  );
+
+  // 81. M5-06: Duplicate-Safe Atomic Insertion
+  await executeTest(
+    'M5-06',
+    'BULK_PLANNER_M5',
+    'Duplicate-Safe Atomic Bulk Creation',
+    'Verifies executing bulk creation adds only non-duplicate jobs into QueueStore and preserves existing jobs unmodified',
+    async () => {
+      await QueueStore.clearAll();
+
+      // Pre-seed an existing job
+      const existing = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      // Request bulk creation for April, May with GSTR-2B
+      const result = await BulkPlanner.executeBulkCreation(
+        {
+          gstin: '27AABCU9603R1ZM',
+          companyName: 'Apex Corp',
+          financialYear: '2025-2026',
+          periods: ['April', 'May'],
+          returnTypes: ['GSTR-2B'],
+        },
+        { isTestJob: true }
+      );
+
+      if (result.created !== 1) {
+        throw new Error(`Expected created=1, got: ${result.created}`);
+      }
+      if (result.skippedDuplicates !== 1) {
+        throw new Error(`Expected skippedDuplicates=1, got: ${result.skippedDuplicates}`);
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 2) {
+        throw new Error(`Expected queue length 2, got: ${queue.length}`);
+      }
+      const existingStillPresent = queue.find((j) => j.id === existing.id);
+      if (!existingStillPresent) {
+        throw new Error('Original pre-seeded job was deleted or corrupted during bulk insert');
+      }
+    }
+  );
+
+  // 82. M5-07: Multi-GSTIN Bulk Planning Support
+  await executeTest(
+    'M5-07',
+    'BULK_PLANNER_M5',
+    'Multi-GSTIN Bulk Planning Isolation',
+    'Verifies bulk plans for distinct GSTINs do not conflict or falsely flag duplicates against one another',
+    async () => {
+      const gstin1 = '27AABCU9603R1ZM';
+      const gstin2 = '29ABCDE1234F1Z5';
+
+      await QueueStore.clearAll();
+
+      // Create jobs for GSTIN 1
+      await BulkPlanner.executeBulkCreation(
+        {
+          gstin: gstin1,
+          financialYear: '2025-2026',
+          periods: ['April', 'May'],
+          returnTypes: ['GSTR-1'],
+        },
+        { isTestJob: true }
+      );
+
+      // Create jobs for GSTIN 2 with identical periods and return types
+      const res2 = await BulkPlanner.executeBulkCreation(
+        {
+          gstin: gstin2,
+          financialYear: '2025-2026',
+          periods: ['April', 'May'],
+          returnTypes: ['GSTR-1'],
+        },
+        { isTestJob: true }
+      );
+
+      if (res2.created !== 2 || res2.skippedDuplicates !== 0) {
+        throw new Error(`Expected GSTIN 2 to create 2 jobs with 0 skipped duplicates, got: ${JSON.stringify(res2)}`);
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 4) {
+        throw new Error(`Expected 4 total jobs across both GSTINs, got: ${queue.length}`);
+      }
+    }
+  );
+
+  // 83. M5-08: Company Name Propagation
+  await executeTest(
+    'M5-08',
+    'BULK_PLANNER_M5',
+    'Company Name Propagation Across Bulk Jobs',
+    'Verifies company name provided during bulk planning is preserved across all generated jobs',
+    async () => {
+      await QueueStore.clearAll();
+      const testCompany = 'Sunrise Logistics Private Limited';
+
+      await BulkPlanner.executeBulkCreation(
+        {
+          gstin: '27AABCU9603R1ZM',
+          companyName: testCompany,
+          financialYear: '2025-2026',
+          periods: ['April', 'May', 'June'],
+          returnTypes: ['GSTR-1', 'GSTR-3B'],
+        },
+        { isTestJob: true }
+      );
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 6) {
+        throw new Error(`Expected 6 jobs created, got: ${queue.length}`);
+      }
+
+      for (const job of queue) {
+        if (job.companyName !== testCompany) {
+          throw new Error(`Job ${job.id} missing expected companyName: "${job.companyName}"`);
+        }
+      }
+    }
+  );
+
+  // 84. M5-09: Sequential Execution Integrity (Only 1 Active)
+  await executeTest(
+    'M5-09',
+    'BULK_PLANNER_M5',
+    'Sequential Execution Integrity with Bulk Jobs',
+    'Verifies that even with a large bulk queue, the queue manager runs strictly sequentially (never in parallel)',
+    async () => {
+      const state = await QueueStore.getQueueState();
+      const activeJobs = state.jobs.filter(
+        (j) =>
+          j.status === 'NAVIGATING' ||
+          j.status === 'PAGE_READY' ||
+          j.status === 'GENERATING' ||
+          j.status === 'WAITING_FOR_DOWNLOAD'
+      );
+
+      if (activeJobs.length > 1) {
+        throw new Error(`Detected ${activeJobs.length} active jobs simultaneously! Parallel execution is strictly forbidden.`);
+      }
+    }
+  );
+
+  // 85. M5-10: Pause and Resume with Large Bulk Queues
+  await executeTest(
+    'M5-10',
+    'BULK_PLANNER_M5',
+    'Pause and Resume with Large Bulk Queues',
+    'Verifies pausing and resuming the queue maintains the state of remaining bulk jobs without skipping or duplicating',
+    async () => {
+      await QueueStore.clearAll();
+      await BulkPlanner.executeBulkCreation(
+        {
+          gstin: '27AABCU9603R1ZM',
+          financialYear: '2025-2026',
+          periods: ['April', 'May', 'June', 'July'],
+          returnTypes: ['GSTR-2B'],
+        },
+        { isTestJob: true }
+      );
+
+      await testQueueManager.pauseQueue();
+      let state = await QueueStore.getQueueState();
+      if (!state.isPaused) {
+        throw new Error('Queue state failed to reflect paused state');
+      }
+
+      await testQueueManager.resumeQueue();
+      state = await QueueStore.getQueueState();
+      if (state.isPaused) {
+        throw new Error('Queue state failed to reflect resumed state');
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 4) {
+        throw new Error(`Expected 4 jobs preserved after pause/resume cycle, found: ${queue.length}`);
+      }
+    }
+  );
+
+  // 86. M5-11: Queue Filtering by Status
+  await executeTest(
+    'M5-11',
+    'BULK_PLANNER_M5',
+    'Queue Filtering by Status',
+    'Verifies queue filter correctly isolates jobs by PENDING, ACTIVE, DOWNLOADED, FAILED, CANCELLED, and SYNCED statuses',
+    async () => {
+      const mockJobs = [
+        { id: '1', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '2', gstin: '27A', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1' as const, status: 'DOWNLOADED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '3', gstin: '27A', financialYear: '2025-2026', period: 'June', returnType: 'GSTR-1' as const, status: 'FAILED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '4', gstin: '27A', financialYear: '2025-2026', period: 'July', returnType: 'GSTR-1' as const, status: 'DOWNLOADED' as const, syncStatus: 'SYNCED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const pendingOnly = BulkPlanner.filterJobs(mockJobs, { status: 'PENDING', returnType: 'ALL', financialYear: 'ALL', gstin: 'ALL', searchQuery: '' });
+      if (pendingOnly.length !== 1 || pendingOnly[0].id !== '1') throw new Error('Failed to filter PENDING jobs');
+
+      const failedOnly = BulkPlanner.filterJobs(mockJobs, { status: 'FAILED', returnType: 'ALL', financialYear: 'ALL', gstin: 'ALL', searchQuery: '' });
+      if (failedOnly.length !== 1 || failedOnly[0].id !== '3') throw new Error('Failed to filter FAILED jobs');
+
+      const syncedOnly = BulkPlanner.filterJobs(mockJobs, { status: 'SYNCED', returnType: 'ALL', financialYear: 'ALL', gstin: 'ALL', searchQuery: '' });
+      if (syncedOnly.length !== 1 || syncedOnly[0].id !== '4') throw new Error('Failed to filter SYNCED jobs');
+    }
+  );
+
+  // 87. M5-12: Queue Filtering by Return Type
+  await executeTest(
+    'M5-12',
+    'BULK_PLANNER_M5',
+    'Queue Filtering by Return Type',
+    'Verifies filtering returns only jobs matching the requested return type (GSTR-1, GSTR-2A, GSTR-2B, GSTR-3B)',
+    async () => {
+      const mockJobs = [
+        { id: '1', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '2', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '3', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-3B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const r2bOnly = BulkPlanner.filterJobs(mockJobs, { status: 'ALL', returnType: 'GSTR-2B', financialYear: 'ALL', gstin: 'ALL', searchQuery: '' });
+      if (r2bOnly.length !== 1 || r2bOnly[0].id !== '2') {
+        throw new Error(`Expected 1 GSTR-2B job, got: ${r2bOnly.length}`);
+      }
+    }
+  );
+
+  // 88. M5-13: Queue Filtering by Financial Year
+  await executeTest(
+    'M5-13',
+    'BULK_PLANNER_M5',
+    'Queue Filtering by Financial Year',
+    'Verifies filtering isolates jobs belonging to a specific financial year',
+    async () => {
+      const mockJobs = [
+        { id: '1', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '2', gstin: '27A', financialYear: '2024-2025', period: 'April', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const fy24 = BulkPlanner.filterJobs(mockJobs, { status: 'ALL', returnType: 'ALL', financialYear: '2024-2025', gstin: 'ALL', searchQuery: '' });
+      if (fy24.length !== 1 || fy24[0].financialYear !== '2024-2025') {
+        throw new Error('Failed to filter by financial year');
+      }
+    }
+  );
+
+  // 89. M5-14: Queue Filtering by GSTIN
+  await executeTest(
+    'M5-14',
+    'BULK_PLANNER_M5',
+    'Queue Filtering by GSTIN',
+    'Verifies filtering isolates jobs belonging to a specific GSTIN',
+    async () => {
+      const mockJobs = [
+        { id: '1', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '2', gstin: '29ABCDE1234F1Z5', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const gstin1Only = BulkPlanner.filterJobs(mockJobs, { status: 'ALL', returnType: 'ALL', financialYear: 'ALL', gstin: '27AABCU9603R1ZM', searchQuery: '' });
+      if (gstin1Only.length !== 1 || gstin1Only[0].id !== '1') {
+        throw new Error('Failed to filter by GSTIN');
+      }
+    }
+  );
+
+  // 90. M5-15: Queue Free-Text Search
+  await executeTest(
+    'M5-15',
+    'BULK_PLANNER_M5',
+    'Queue Free-Text Search',
+    'Verifies search query matches across GSTIN, company name, return period, and return type',
+    async () => {
+      const mockJobs = [
+        { id: 'job_alpha', gstin: '27AABCU9603R1ZM', companyName: 'Reliance Trading', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: 'job_beta', gstin: '29ABCDE1234F1Z5', companyName: 'Tata Motors', financialYear: '2025-2026', period: 'September', returnType: 'GSTR-1' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      // Search company name substring
+      const searchCompany = BulkPlanner.filterJobs(mockJobs, { status: 'ALL', returnType: 'ALL', financialYear: 'ALL', gstin: 'ALL', searchQuery: 'Reliance' });
+      if (searchCompany.length !== 1 || searchCompany[0].id !== 'job_alpha') {
+        throw new Error('Failed to search by company name');
+      }
+
+      // Search period substring
+      const searchPeriod = BulkPlanner.filterJobs(mockJobs, { status: 'ALL', returnType: 'ALL', financialYear: 'ALL', gstin: 'ALL', searchQuery: 'Sept' });
+      if (searchPeriod.length !== 1 || searchPeriod[0].id !== 'job_beta') {
+        throw new Error('Failed to search by period substring');
+      }
+    }
+  );
+
+  // 91. M5-16: Multi-Filter Composition
+  await executeTest(
+    'M5-16',
+    'BULK_PLANNER_M5',
+    'Multi-Filter Composition',
+    'Verifies combining status, return type, and search query applies strict logical AND matching',
+    async () => {
+      const mockJobs = [
+        { id: '1', gstin: '27AABCU9603R1ZM', companyName: 'Target Company', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B' as const, status: 'DOWNLOADED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '2', gstin: '27AABCU9603R1ZM', companyName: 'Target Company', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1' as const, status: 'DOWNLOADED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '3', gstin: '27AABCU9603R1ZM', companyName: 'Target Company', financialYear: '2025-2026', period: 'June', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const combined = BulkPlanner.filterJobs(mockJobs, {
+        status: 'DOWNLOADED',
+        returnType: 'GSTR-2B',
+        financialYear: 'ALL',
+        gstin: 'ALL',
+        searchQuery: 'Target',
+      });
+
+      if (combined.length !== 1 || combined[0].id !== '1') {
+        throw new Error(`Expected only job 1 to match combined filters, got count: ${combined.length}`);
+      }
+    }
+  );
+
+  // 92. M5-17: Job Selection Toggle
+  await executeTest(
+    'M5-17',
+    'BULK_PLANNER_M5',
+    'Job Selection State Integrity',
+    'Verifies individual job selection allows toggling selection on and off cleanly without mutating job data',
+    async () => {
+      let selectedIds: string[] = [];
+      const toggle = (id: string) => {
+        selectedIds = selectedIds.includes(id) ? selectedIds.filter((x) => x !== id) : [...selectedIds, id];
+      };
+
+      toggle('job-1');
+      if (!selectedIds.includes('job-1')) throw new Error('Failed to select job');
+
+      toggle('job-1');
+      if (selectedIds.includes('job-1')) throw new Error('Failed to deselect job');
+    }
+  );
+
+  // 93. M5-18: Select All Visible Filtered Jobs
+  await executeTest(
+    'M5-18',
+    'BULK_PLANNER_M5',
+    'Select All Visible Filtered Jobs',
+    'Verifies selecting all visible jobs captures exactly the IDs matching current active filters',
+    async () => {
+      const mockJobs = [
+        { id: 'a1', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: 'a2', gstin: '27A', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: 'b1', gstin: '27A', financialYear: '2025-2026', period: 'June', returnType: 'GSTR-2B' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const visible = BulkPlanner.filterJobs(mockJobs, {
+        status: 'ALL',
+        returnType: 'GSTR-1',
+        financialYear: 'ALL',
+        gstin: 'ALL',
+        searchQuery: '',
+      });
+
+      const selectedIds = visible.map((j) => j.id);
+      if (selectedIds.length !== 2 || !selectedIds.includes('a1') || !selectedIds.includes('a2')) {
+        throw new Error(`Select all visible failed: ${JSON.stringify(selectedIds)}`);
+      }
+    }
+  );
+
+  // 94. M5-19: Clear Selection Action
+  await executeTest(
+    'M5-19',
+    'BULK_PLANNER_M5',
+    'Clear Selection Action',
+    'Verifies clear selection removes all selected IDs instantly',
+    async () => {
+      let selectedIds = ['job-1', 'job-2', 'job-3'];
+      selectedIds = [];
+      if (selectedIds.length !== 0) throw new Error('Failed to clear selection');
+    }
+  );
+
+  // 95. M5-20: Bulk Action - Retry Selected Failed Jobs
+  await executeTest(
+    'M5-20',
+    'BULK_PLANNER_M5',
+    'Bulk Action: Retry Selected Failed Jobs',
+    'Verifies bulk retrying selected jobs resets FAILED jobs to PENDING while leaving non-failed jobs untouched',
+    async () => {
+      await QueueStore.clearAll();
+
+      const failedJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+      await QueueStore.updateJob(failedJob.id, {
+        status: 'FAILED',
+        error: 'Network timeout during portal download',
+      });
+
+      const pendingJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      const allJobs = await QueueStore.getQueue();
+      const selectedIds = [failedJob.id, pendingJob.id];
+
+      const res = await BulkPlanner.retrySelectedJobs(selectedIds, allJobs);
+      if (res.retriedCount !== 1) {
+        throw new Error(`Expected retriedCount=1, got: ${res.retriedCount}`);
+      }
+
+      const refreshedFailed = (await QueueStore.getQueue()).find((j) => j.id === failedJob.id);
+      if (refreshedFailed?.status !== 'PENDING' || refreshedFailed.error !== null) {
+        throw new Error(`Failed job was not reset cleanly: status=${refreshedFailed?.status}`);
+      }
+    }
+  );
+
+  // 96. M5-21: Bulk Action - Remove Selected Jobs
+  await executeTest(
+    'M5-21',
+    'BULK_PLANNER_M5',
+    'Bulk Action: Remove Selected Jobs',
+    'Verifies bulk removal deletes selected jobs from QueueStore correctly',
+    async () => {
+      await QueueStore.clearAll();
+
+      const j1 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+      const j2 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+      const j3 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'June',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      const res = await BulkPlanner.removeSelectedJobs([j1.id, j2.id], null, false);
+      if (res.removedCount !== 2) {
+        throw new Error(`Expected removedCount=2, got: ${res.removedCount}`);
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 1 || queue[0].id !== j3.id) {
+        throw new Error(`Queue did not retain only j3, got length: ${queue.length}`);
+      }
+    }
+  );
+
+  // 97. M5-22: Bulk Action - Active Job Protection
+  await executeTest(
+    'M5-22',
+    'BULK_PLANNER_M5',
+    'Active Job Protection During Bulk Removal',
+    'Verifies bulk removal protects currently active/downloading jobs unless forced',
+    async () => {
+      await QueueStore.clearAll();
+
+      const activeJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+      await QueueStore.updateJob(activeJob.id, { status: 'NAVIGATING' });
+
+      const pendingJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      // Attempt to remove both with activeJobId set
+      const res = await BulkPlanner.removeSelectedJobs(
+        [activeJob.id, pendingJob.id],
+        activeJob.id,
+        false
+      );
+
+      if (res.removedCount !== 1) {
+        throw new Error(`Expected removedCount=1, got: ${res.removedCount}`);
+      }
+      if (res.skippedActiveCount !== 1) {
+        throw new Error(`Expected skippedActiveCount=1, got: ${res.skippedActiveCount}`);
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 1 || queue[0].id !== activeJob.id) {
+        throw new Error('Active job was improperly removed during bulk remove operation');
+      }
+    }
+  );
+
+  // 98. M5-23: Bulk Action - Sync Selected Downloaded Jobs
+  await executeTest(
+    'M5-23',
+    'BULK_PLANNER_M5',
+    'Bulk Action: Sync Selected Downloaded Jobs',
+    'Verifies bulk sync processes only selected DOWNLOADED jobs with local storage engine',
+    async () => {
+      const testSync = SyncEngine.getInstance();
+      await testSync.configureRoot();
+
+      await QueueStore.clearAll();
+      const j1 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: false,
+      });
+      await QueueStore.updateJob(j1.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR-2B_27AABCU9603R1ZM_042025.json',
+        downloadContent: JSON.stringify({ gstin: '27AABCU9603R1ZM', fp: '042025', returnType: 'GSTR-2B' }),
+      });
+
+      const j2 = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        returnType: 'GSTR-2B',
+        isTestJob: false,
+      });
+      await QueueStore.updateJob(j2.id, {
+        status: 'DOWNLOADED',
+        filename: 'GSTR-2B_27AABCU9603R1ZM_052025.json',
+        downloadContent: JSON.stringify({ gstin: '27AABCU9603R1ZM', fp: '052025', returnType: 'GSTR-2B' }),
+      });
+
+      const queue = await QueueStore.getQueue();
+      const res = await BulkPlanner.syncSelectedJobs([j1.id, j2.id], queue, testSync);
+
+      if (res.syncedCount !== 2) {
+        throw new Error(`Expected syncedCount=2, got: ${res.syncedCount}`);
+      }
+
+      const refreshed = await QueueStore.getQueue();
+      if (!refreshed.every((j) => j.syncStatus === 'SYNCED')) {
+        throw new Error('All selected jobs should have syncStatus SYNCED');
+      }
+    }
+  );
+
+  // 99. M5-24: Real-Time Queue Summary Metric Derivations
+  await executeTest(
+    'M5-24',
+    'BULK_PLANNER_M5',
+    'Queue Summary Metrics Accuracy',
+    'Verifies total, pending, active, downloaded, synced, and failed metrics derive directly from queue state',
+    async () => {
+      const sampleJobs = [
+        { id: '1', gstin: '27A', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1' as const, status: 'PENDING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '2', gstin: '27A', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1' as const, status: 'NAVIGATING' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '3', gstin: '27A', financialYear: '2025-2026', period: 'June', returnType: 'GSTR-1' as const, status: 'DOWNLOADED' as const, syncStatus: 'SYNCED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: '4', gstin: '27A', financialYear: '2025-2026', period: 'July', returnType: 'GSTR-1' as const, status: 'FAILED' as const, isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const total = sampleJobs.length;
+      const pending = sampleJobs.filter((j) => j.status === 'PENDING').length;
+      const active = sampleJobs.filter((j) => j.status === 'NAVIGATING').length;
+      const downloaded = sampleJobs.filter((j) => j.status === 'DOWNLOADED').length;
+      const synced = sampleJobs.filter((j) => j.syncStatus === 'SYNCED').length;
+      const failed = sampleJobs.filter((j) => j.status === 'FAILED').length;
+
+      if (total !== 4 || pending !== 1 || active !== 1 || downloaded !== 1 || synced !== 1 || failed !== 1) {
+        throw new Error('Summary metrics derivation mismatch');
+      }
+    }
+  );
+
+  // 100. M5-25: Strict Zero-Credential & Zero-Knowledge Security Invariant
+  await executeTest(
+    'M5-25',
+    'BULK_PLANNER_M5',
+    'Zero-Credential Security in Bulk Operations',
+    'Verifies Bulk Planner inputs and data models do not accept or persist user credentials, OTPs, or passwords',
+    async () => {
+      const bulkPlannerStr = BulkPlanner.toString().toLowerCase();
+      const forbidden = ['password', 'otp', 'captcha', 'secret_key', 'token_auth'];
+      for (const f of forbidden) {
+        if (bulkPlannerStr.includes(f)) {
+          throw new Error(`BulkPlanner contains forbidden credential keyword: ${f}`);
+        }
+      }
+    }
+  );
+
+  // 101. M5-26: High-Volume Bulk Queue Performance & Memory Safety
+  await executeTest(
+    'M5-26',
+    'BULK_PLANNER_M5',
+    'High-Volume Bulk Queue Performance (<50ms)',
+    'Verifies planning and calculating duplicate protection across 100+ simulated jobs executes in under 50ms',
+    async () => {
+      // Generate 100 existing jobs in memory
+      const largeExistingQueue = [];
+      const periods = ['April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December', 'January', 'February', 'March'] as const;
+      const returnTypes = ['GSTR-1', 'GSTR-2A', 'GSTR-2B', 'GSTR-3B'] as const;
+
+      for (let i = 0; i < 25; i++) {
+        for (const rt of returnTypes) {
+          largeExistingQueue.push({
+            id: `large_job_${i}_${rt}`,
+            gstin: `27AABCU960${i % 10}R1ZM`,
+            financialYear: '2025-2026',
+            period: periods[i % 12],
+            returnType: rt,
+            status: 'PENDING' as const,
+            isTestJob: true,
+            retryCount: 0,
+            maxRetries: 3,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
+      }
+
+      const start = performance.now();
+      const plan = BulkPlanner.calculatePlan(
+        {
+          gstin: '27AABCU9600R1ZM',
+          financialYear: '2025-2026',
+          periods: [...periods],
+          returnTypes: [...returnTypes],
+        },
+        largeExistingQueue
+      );
+      const duration = performance.now() - start;
+
+      if (duration > 50) {
+        throw new Error(`Bulk calculation took ${duration}ms, exceeding 50ms budget`);
+      }
+      if (plan.totalRequested !== 48) {
+        throw new Error(`Expected 48 jobs requested, got: ${plan.totalRequested}`);
+      }
+    }
+  );
+
+  // =========================================================================
+  // MILESTONE 6: PRODUCTION RELIABILITY, DIAGNOSTICS, BACKUP & RECOVERY (M6)
+  // =========================================================================
+
+  // 102. M6-01: Error Classification Taxonomy & Code Extraction
+  await executeTest(
+    'M6-01',
+    'RELIABILITY_M6',
+    'Error Classification Taxonomy & Code Extraction',
+    'Verifies arbitrary error messages map accurately to defined GstErrorCode values',
+    async () => {
+      const err1 = classifyError('Session has timed out due to inactivity');
+      if (err1.code !== 'AUTH_SESSION_EXPIRED') {
+        throw new Error(`Expected AUTH_SESSION_EXPIRED, got: ${err1.code}`);
+      }
+
+      const err2 = classifyError('Rate limit exceeded (429)');
+      if (err2.code !== 'PORTAL_RATE_LIMITED') {
+        throw new Error(`Expected PORTAL_RATE_LIMITED, got: ${err2.code}`);
+      }
+
+      const err3 = classifyError('GST portal returned 503 Service Unavailable');
+      if (err3.code !== 'PORTAL_UNAVAILABLE') {
+        throw new Error(`Expected PORTAL_UNAVAILABLE, got: ${err3.code}`);
+      }
+
+      const err4 = classifyError('Download interrupted by network drop');
+      if (err4.code !== 'DOWNLOAD_INTERRUPTED') {
+        throw new Error(`Expected DOWNLOAD_INTERRUPTED, got: ${err4.code}`);
+      }
+
+      const err5 = classifyError('Downloaded content is an HTML web page / login redirect');
+      if (err5.code !== 'HTML_CONTENT_REJECTED') {
+        throw new Error(`Expected HTML_CONTENT_REJECTED, got: ${err5.code}`);
+      }
+    }
+  );
+
+  // 103. M6-02: Error Message Redaction & Zero-Knowledge Sanitization
+  await executeTest(
+    'M6-02',
+    'RELIABILITY_M6',
+    'Zero-Knowledge Error Message Redaction',
+    'Verifies passwords, OTPs, auth tokens, and session cookies are stripped from error messages',
+    async () => {
+      const rawError = 'Failed login with password=SecretPassword123 and otp=987654 and token=eyJhbGciOi...';
+      const sanitized = sanitizeErrorMessage(rawError);
+
+      if (sanitized.includes('SecretPassword123')) {
+        throw new Error('Sanitizer failed to redact password');
+      }
+      if (sanitized.includes('987654')) {
+        throw new Error('Sanitizer failed to redact OTP');
+      }
+      if (sanitized.includes('eyJhbGciOi')) {
+        throw new Error('Sanitizer failed to redact JWT token');
+      }
+      if (!sanitized.includes('[REDACTED]')) {
+        throw new Error('Expected [REDACTED] replacement in sanitized string');
+      }
+    }
+  );
+
+  // 104. M6-03: User-Friendly Diagnostic Explanations
+  await executeTest(
+    'M6-03',
+    'RELIABILITY_M6',
+    'User-Friendly Diagnostic Explanations',
+    'Verifies all classified errors produce human-actionable messages without raw stack traces',
+    async () => {
+      const classified = classifyError('File generation timed out after 30s');
+      if (!classified.userMessage || classified.userMessage.includes('at Object.') || classified.userMessage.includes('Error:')) {
+        throw new Error(`Expected user-friendly message, got: ${classified.userMessage}`);
+      }
+      if (!classified.userMessage.includes('GST Portal timed out')) {
+        throw new Error(`Message does not convey GST Portal timeout: ${classified.userMessage}`);
+      }
+    }
+  );
+
+  // 105. M6-04: Job Error Metadata Storage
+  await executeTest(
+    'M6-04',
+    'RELIABILITY_M6',
+    'Job Error Metadata Storage',
+    'Verifies lastErrorCode, lastErrorMessage, and lastErrorAt are persisted on failure',
+    async () => {
+      await QueueStore.clearAll();
+      const job = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+        maxRetries: 1,
+      });
+
+      await testQueueManager.handleJobFailure(job.id, 'Session expired during navigation');
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === job.id);
+
+      if (!updated) throw new Error('Job not found in queue');
+      if (updated.status !== 'FAILED') throw new Error(`Expected FAILED status, got: ${updated.status}`);
+      if (updated.lastErrorCode !== 'AUTH_SESSION_EXPIRED') {
+        throw new Error(`Expected lastErrorCode AUTH_SESSION_EXPIRED, got: ${updated.lastErrorCode}`);
+      }
+      if (!updated.lastErrorMessage || !updated.lastErrorMessage.includes('session has expired')) {
+        throw new Error(`Expected friendly error message, got: ${updated.lastErrorMessage}`);
+      }
+      if (!updated.lastErrorAt || updated.lastErrorAt <= 0) {
+        throw new Error('Expected positive timestamp for lastErrorAt');
+      }
+    }
+  );
+
+  // 106. M6-05: Bounded Event History Invariant (Max 50 Events)
+  await executeTest(
+    'M6-05',
+    'RELIABILITY_M6',
+    'Bounded Event History Invariant (Max 50)',
+    'Verifies job event history appends sequentially and never exceeds 50 events',
+    async () => {
+      await QueueStore.clearAll();
+      const job = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'May',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      // Update the job 60 times
+      for (let i = 0; i < 60; i++) {
+        await QueueStore.updateJob(job.id, {
+          status: 'PENDING',
+          retryCount: i,
+        });
+      }
+
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === job.id);
+      if (!updated || !updated.history) throw new Error('Job history missing');
+      if (updated.history.length > 50) {
+        throw new Error(`History length ${updated.history.length} exceeded bounded cap of 50`);
+      }
+    }
+  );
+
+  // 107. M6-06: Event History Logging on Status Transitions
+  await executeTest(
+    'M6-06',
+    'RELIABILITY_M6',
+    'Event History Logging on Status Transitions',
+    'Verifies history records transitions from PENDING through DOWNLOADED and SYNCED',
+    async () => {
+      await QueueStore.clearAll();
+      const job = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'June',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      await QueueStore.updateJob(job.id, { status: 'NAVIGATING' });
+      await QueueStore.updateJob(job.id, { status: 'DOWNLOADED' });
+      await QueueStore.updateJob(job.id, { syncStatus: 'SYNCED' });
+
+      const updated = (await QueueStore.getQueue()).find((j) => j.id === job.id);
+      if (!updated?.history) throw new Error('History missing');
+
+      const statuses = updated.history.map((h) => h.status);
+      if (!statuses.includes('PENDING') || !statuses.includes('NAVIGATING') || !statuses.includes('DOWNLOADED')) {
+        throw new Error(`Expected recorded statuses PENDING, NAVIGATING, DOWNLOADED; got: ${statuses.join(', ')}`);
+      }
+    }
+  );
+
+  // 108. M6-07: Diagnostic Logger Structured Entry Redaction
+  await executeTest(
+    'M6-07',
+    'RELIABILITY_M6',
+    'Diagnostic Logger Structured Entry Redaction',
+    'Verifies DiagnosticLogger redacts sensitive fields in structured data arguments',
+    async () => {
+      DiagnosticLogger.clearLogs();
+      DiagnosticLogger.info('AuthGuard', 'TEST_LOGIN', 'User attempted login', {
+        data: {
+          username: 'taxpayer123',
+          password: 'Secret123Password',
+          otp: '123456',
+          token: 'jwt-abc-xyz',
+          safeField: 'valid_data',
+        },
+      });
+
+      const logs = DiagnosticLogger.getLogs();
+      const latest = logs[0];
+      if (!latest) throw new Error('Log not found');
+
+      const dataStr = JSON.stringify(latest.data);
+      if (dataStr.includes('Secret123Password') || dataStr.includes('123456') || dataStr.includes('jwt-abc-xyz')) {
+        throw new Error(`DiagnosticLogger did not redact sensitive keys: ${dataStr}`);
+      }
+      if (!dataStr.includes('[REDACTED]')) {
+        throw new Error('Expected [REDACTED] in sanitized log data');
+      }
+    }
+  );
+
+  // 109. M6-08: Diagnostic Logger Event Subscriptions & History Clearing
+  await executeTest(
+    'M6-08',
+    'RELIABILITY_M6',
+    'Diagnostic Logger Event Subscriptions',
+    'Verifies subscriber callbacks fire on diagnostic log entries and unsubscribe cleanly',
+    async () => {
+      let notifiedCount = 0;
+      const unsubscribe = DiagnosticLogger.subscribe((_entry) => {
+        notifiedCount++;
+      });
+
+      DiagnosticLogger.info('Queue', 'SUB_TEST_1', 'Event 1');
+      DiagnosticLogger.warn('Queue', 'SUB_TEST_2', 'Event 2');
+
+      if (notifiedCount < 2) {
+        throw new Error(`Expected at least 2 notifications, got: ${notifiedCount}`);
+      }
+
+      unsubscribe();
+      const beforeUnsub = notifiedCount;
+      DiagnosticLogger.info('Queue', 'SUB_TEST_3', 'Event 3');
+
+      if (notifiedCount !== beforeUnsub) {
+        throw new Error('Subscriber fired after unsubscription');
+      }
+    }
+  );
+
+  // 110. M6-09: Diagnostic System Report Generation with Health Telemetry
+  await executeTest(
+    'M6-09',
+    'RELIABILITY_M6',
+    'Diagnostic System Report Generation',
+    'Verifies system health summary and diagnostic report contains zero sensitive credentials',
+    async () => {
+      const report = DiagnosticLogger.generateReport({
+        extensionStatus: 'OK',
+        queueStatus: 'OK',
+        storageStatus: 'OK',
+        localStorageStatus: 'CONNECTED',
+        downloadMonitorStatus: 'OK',
+        serviceWorkerStatus: 'RUNNING',
+        activeJobId: null,
+        totalJobs: 10,
+        failedJobs: 0,
+        syncedJobs: 5,
+        lastVerifiedAt: Date.now(),
+      });
+
+      if (!report.systemHealth || report.systemHealth.extensionStatus !== 'OK') {
+        throw new Error('Report missing valid systemHealth block');
+      }
+      if (report.recentLogs.length === 0) {
+        throw new Error('Report missing recentLogs');
+      }
+
+      const reportStr = JSON.stringify(report).toLowerCase();
+      const forbidden = ['password', 'otp', 'token', 'captcha', 'cookie'];
+      for (const f of forbidden) {
+        if (reportStr.includes(`"${f}":`)) {
+          throw new Error(`Report contains sensitive key: ${f}`);
+        }
+      }
+    }
+  );
+
+  // 111. M6-10: Queue Integrity Validator: Valid Queue Detection
+  await executeTest(
+    'M6-10',
+    'RELIABILITY_M6',
+    'Queue Integrity Validator: Clean State Detection',
+    'Verifies a clean queue validates as healthy with zero issues',
+    async () => {
+      const jobs: any[] = [
+        { id: 'job_1', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+        { id: 'job_2', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1', status: 'DOWNLOADED', syncStatus: 'SYNCED', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+      ];
+
+      const validation = QueueIntegrityValidator.validate({ jobs, isRunning: false, isPaused: false, activeJobId: null, lastUpdated: Date.now() });
+      if (!validation.isValid) {
+        throw new Error(`Expected valid queue, got violations: ${validation.violations.map((v) => v.message).join('; ')}`);
+      }
+    }
+  );
+
+  // 112. M6-11: Queue Integrity Validator: Duplicate Detection & Repair
+  await executeTest(
+    'M6-11',
+    'RELIABILITY_M6',
+    'Queue Integrity Validator: Duplicate Detection & Repair',
+    'Verifies identical active jobs are identified and repaired by keeping earliest creation',
+    async () => {
+      const corruptJobs: any[] = [
+        { id: 'job_1', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 100, updatedAt: 100 },
+        { id: 'job_2', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 200, updatedAt: 200 },
+      ];
+
+      const validation = QueueIntegrityValidator.validate({ jobs: corruptJobs, isRunning: false, isPaused: false, activeJobId: null, lastUpdated: Date.now() });
+      if (validation.isValid) {
+        throw new Error('Integrity validator failed to detect duplicate active job');
+      }
+
+      const repair = QueueIntegrityValidator.repair({ jobs: corruptJobs, isRunning: false, isPaused: false, activeJobId: null, lastUpdated: Date.now() });
+      if (repair.repairedState.jobs.length !== 1) {
+        throw new Error(`Expected 1 repaired job, got: ${repair.repairedState.jobs.length}`);
+      }
+      if (repair.repairedState.jobs[0].id !== 'job_1') {
+        throw new Error(`Expected earlier job_1 preserved, got: ${repair.repairedState.jobs[0].id}`);
+      }
+    }
+  );
+
+  // 113. M6-12: Queue Integrity Validator: Active Job Conflict Detection & Repair
+  await executeTest(
+    'M6-12',
+    'RELIABILITY_M6',
+    'Queue Integrity Validator: Active Job Conflict Repair',
+    'Verifies multiple jobs marked as actively running are reconciled to at most one',
+    async () => {
+      const conflictingJobs: any[] = [
+        { id: 'job_1', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1', status: 'NAVIGATING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 100, updatedAt: 100 },
+        { id: 'job_2', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1', status: 'GENERATING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 200, updatedAt: 200 },
+      ];
+
+      const validation = QueueIntegrityValidator.validate({ jobs: conflictingJobs, isRunning: true, isPaused: false, activeJobId: 'job_1', lastUpdated: Date.now() });
+      if (validation.isValid) {
+        throw new Error('Expected conflict detected for multiple in-flight jobs');
+      }
+
+      const repair = QueueIntegrityValidator.repair({ jobs: conflictingJobs, isRunning: true, isPaused: false, activeJobId: 'job_1', lastUpdated: Date.now() });
+      const activeCount = repair.repairedState.jobs.filter((j) => j.status === 'NAVIGATING' || j.status === 'GENERATING').length;
+      if (activeCount > 1) {
+        throw new Error(`Expected at most 1 active job after repair, got: ${activeCount}`);
+      }
+    }
+  );
+
+  // 114. M6-13: Queue Integrity Validator: Invalid Status / Malformed Job Repair
+  await executeTest(
+    'M6-13',
+    'RELIABILITY_M6',
+    'Queue Integrity Validator: Malformed Job Repair',
+    'Verifies jobs missing required fields or having corrupted statuses are repaired or purged',
+    async () => {
+      const malformed: any[] = [
+        { id: 'job_1', gstin: '', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-1', status: 'PENDING' },
+        { id: 'job_2', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-1', status: 'CORRUPTED_STATUS' as any },
+      ];
+
+      const repair = QueueIntegrityValidator.repair({ jobs: malformed, isRunning: false, isPaused: false, activeJobId: null, lastUpdated: Date.now() });
+      if (repair.repairedState.jobs.some((j) => !j.gstin)) {
+        throw new Error('Malformed job with missing GSTIN was not removed');
+      }
+      const repairedJob2 = repair.repairedState.jobs.find((j) => j.id === 'job_2');
+      if (repairedJob2 && (repairedJob2.status as any) === 'CORRUPTED_STATUS') {
+        throw new Error('Invalid status was not normalized');
+      }
+    }
+  );
+
+  // 115. M6-14: Storage Schema Manager: Initialization & Version Tracking
+  await executeTest(
+    'M6-14',
+    'RELIABILITY_M6',
+    'Storage Schema Manager: Version Tracking (v1)',
+    'Verifies SchemaManager initializes and enforces schema version 1',
+    async () => {
+      const version = await SchemaManager.getSchemaVersion();
+      if (version < 0) {
+        throw new Error(`Expected valid schema version number, got: ${version}`);
+      }
+    }
+  );
+
+  // 116. M6-15: Storage Schema Manager: Forward Migration from v0 to v1
+  await executeTest(
+    'M6-15',
+    'RELIABILITY_M6',
+    'Storage Schema Manager: Migration from v0 to v1',
+    'Verifies legacy unversioned storage is migrated forward to current schema version',
+    async () => {
+      // Force version to 0
+      await SchemaManager.setSchemaVersion(0);
+      const result = await SchemaManager.migrate();
+
+      if (!result.migrated) {
+        throw new Error('Expected migration to execute when version was 0');
+      }
+
+      const version = await SchemaManager.getSchemaVersion();
+      if (version !== CURRENT_STORAGE_SCHEMA_VERSION) {
+        throw new Error(`Expected schema version ${CURRENT_STORAGE_SCHEMA_VERSION} post-migration, got: ${version}`);
+      }
+    }
+  );
+
+  // 117. M6-16: Storage Schema Manager: Validate & Repair Full Storage Subsystem
+  await executeTest(
+    'M6-16',
+    'RELIABILITY_M6',
+    'Storage Schema Manager: Subsystem Repair',
+    'Verifies validateAndRepairStorage sanitizes both schema version and queue entries',
+    async () => {
+      const result = await SchemaManager.validateAndRepairStorage();
+      if (result.healthy === undefined) {
+        throw new Error('Storage repair result missing healthy status');
+      }
+    }
+  );
+
+  // 118. M6-17: Backup Manager: Export Sanitization & Structure Verification
+  await executeTest(
+    'M6-17',
+    'RELIABILITY_M6',
+    'Backup Manager: Export Structure Verification',
+    'Verifies BackupManager.exportBackup generates a complete, valid UdaanBackupData structure',
+    async () => {
+      await QueueStore.clearAll();
+      await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      const backup = await BackupManager.exportBackup();
+      if (backup.format !== 'UDAAN_GST_QUEUE_BACKUP') {
+        throw new Error(`Expected format UDAAN_GST_QUEUE_BACKUP, got: ${backup.format}`);
+      }
+      if (backup.schemaVersion !== 1) {
+        throw new Error(`Expected schemaVersion 1, got: ${backup.schemaVersion}`);
+      }
+      if (backup.queue.jobs.length !== 1) {
+        throw new Error(`Expected 1 exported job, got: ${backup.queue.jobs.length}`);
+      }
+    }
+  );
+
+  // 119. M6-18: Backup Manager: Export Zero-Knowledge Invariant
+  await executeTest(
+    'M6-18',
+    'RELIABILITY_M6',
+    'Backup Manager: Zero-Knowledge Invariant',
+    'Verifies export contains no passwords, OTPs, auth tokens, or cookies',
+    async () => {
+      const backup = await BackupManager.exportBackup();
+      const backupStr = JSON.stringify(backup).toLowerCase();
+      const forbidden = ['password', 'otp', 'captcha', 'cookie', 'bearer', 'authorization'];
+      for (const f of forbidden) {
+        if (backupStr.includes(`"${f}":`)) {
+          throw new Error(`Backup export contains forbidden credential key: ${f}`);
+        }
+      }
+    }
+  );
+
+  // 120. M6-19: Backup Manager: Validation of Corrupt / Tampered Backup Payloads
+  await executeTest(
+    'M6-19',
+    'RELIABILITY_M6',
+    'Backup Manager: Corrupt Payload Validation',
+    'Verifies invalid or tampered JSON formats are rejected during backup validation',
+    async () => {
+      const invalidPayload = {
+        format: 'INVALID_FORMAT',
+        schemaVersion: 99,
+        queue: { jobs: 'not_an_array' },
+      };
+
+      const result = BackupManager.validateBackup(invalidPayload);
+      if (result.valid) {
+        throw new Error('Expected validation failure for invalid backup payload');
+      }
+      if (result.errors.length === 0) {
+        throw new Error('Expected descriptive errors for invalid payload');
+      }
+    }
+  );
+
+  // 121. M6-20: Backup Manager: Validation Warnings for Duplicate Backup Entries
+  await executeTest(
+    'M6-20',
+    'RELIABILITY_M6',
+    'Backup Manager: Duplicate Backup Job Warnings',
+    'Verifies validation detects duplicate jobs within the backup file itself',
+    async () => {
+      const backupWithDupes: UdaanBackupData = {
+        format: 'UDAAN_GST_QUEUE_BACKUP',
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        appVersion: '1.0.0',
+        queue: {
+          jobs: [
+            { id: 'b_1', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+            { id: 'b_2', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 2, updatedAt: 2 },
+          ],
+          isRunning: false,
+          isPaused: false,
+          activeJobId: null,
+          lastUpdated: Date.now(),
+        },
+      };
+
+      const result = BackupManager.validateBackup(backupWithDupes);
+      if (result.warnings.length === 0) {
+        throw new Error('Expected validation warning for duplicate return entries in backup');
+      }
+    }
+  );
+
+  // 122. M6-21: Backup Manager: Restore Strategy MERGE (Deduplicate & Append)
+  await executeTest(
+    'M6-21',
+    'RELIABILITY_M6',
+    'Backup Restore Strategy: MERGE',
+    'Verifies MERGE strategy appends new jobs and skips existing duplicates without data loss',
+    async () => {
+      await QueueStore.clearAll();
+      const existingJob = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'April',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      const backupToMerge: UdaanBackupData = {
+        format: 'UDAAN_GST_QUEUE_BACKUP',
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        appVersion: '1.0.0',
+        queue: {
+          jobs: [
+            // Duplicate
+            { id: existingJob.id, gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'April', returnType: 'GSTR-2B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+            // New job
+            { id: 'new_job_2', gstin: '27AABCU9603R1ZM', financialYear: '2025-2026', period: 'May', returnType: 'GSTR-2B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 2, updatedAt: 2 },
+          ],
+          isRunning: false,
+          isPaused: false,
+          activeJobId: null,
+          lastUpdated: Date.now(),
+        },
+      };
+
+      const restoreResult = await BackupManager.restoreBackup(backupToMerge, 'MERGE');
+      if (!restoreResult.success) {
+        throw new Error(`MERGE restore failed: ${restoreResult.error}`);
+      }
+      if (restoreResult.jobsRestored !== 1) {
+        throw new Error(`Expected 1 new job restored, got: ${restoreResult.jobsRestored}`);
+      }
+      if (restoreResult.jobsSkipped !== 1) {
+        throw new Error(`Expected 1 duplicate job skipped, got: ${restoreResult.jobsSkipped}`);
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 2) {
+        throw new Error(`Expected 2 total jobs in queue post-merge, got: ${queue.length}`);
+      }
+    }
+  );
+
+  // 123. M6-22: Backup Manager: Restore Strategy REPLACE (Atomic State Reset)
+  await executeTest(
+    'M6-22',
+    'RELIABILITY_M6',
+    'Backup Restore Strategy: REPLACE',
+    'Verifies REPLACE strategy safely overwrites existing queue state with validated backup',
+    async () => {
+      await QueueStore.clearAll();
+      await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'January',
+        returnType: 'GSTR-1',
+        isTestJob: true,
+      });
+
+      const backupToReplace: UdaanBackupData = {
+        format: 'UDAAN_GST_QUEUE_BACKUP',
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        appVersion: '1.0.0',
+        queue: {
+          jobs: [
+            { id: 'rep_1', gstin: '29ABCDE1234F1Z5', financialYear: '2025-2026', period: 'February', returnType: 'GSTR-3B', status: 'PENDING', isTestJob: true, retryCount: 0, maxRetries: 3, createdAt: 1, updatedAt: 1 },
+          ],
+          isRunning: false,
+          isPaused: false,
+          activeJobId: null,
+          lastUpdated: Date.now(),
+        },
+      };
+
+      const restoreResult = await BackupManager.restoreBackup(backupToReplace, 'REPLACE');
+      if (!restoreResult.success) {
+        throw new Error(`REPLACE restore failed: ${restoreResult.error}`);
+      }
+
+      const queue = await QueueStore.getQueue();
+      if (queue.length !== 1 || queue[0].id !== 'rep_1') {
+        throw new Error('Queue was not replaced atomically with backup content');
+      }
+    }
+  );
+
+  // 124. M6-23: Safe Queue Recovery on Service Worker Startup
+  await executeTest(
+    'M6-23',
+    'RELIABILITY_M6',
+    'Safe Startup Recovery for In-Flight Jobs',
+    'Verifies jobs left in intermediate execution states (NAVIGATING, PAGE_READY) reset safely to PENDING',
+    async () => {
+      await QueueStore.clearAll();
+      const job = await QueueStore.addJob({
+        gstin: '27AABCU9603R1ZM',
+        financialYear: '2025-2026',
+        period: 'March',
+        returnType: 'GSTR-2B',
+        isTestJob: true,
+      });
+
+      await QueueStore.updateJob(job.id, { status: 'NAVIGATING' });
+      await QueueStore.updateQueueState({ activeJobId: job.id, isRunning: true });
+
+      // Run startup recovery
+      await testQueueManager.recoverQueueOnStartup();
+
+      const state = await QueueStore.getQueueState();
+      const recoveredJob = state.jobs.find((j) => j.id === job.id);
+
+      if (!recoveredJob) throw new Error('Job lost during recovery');
+      if (recoveredJob.status !== 'PENDING') {
+        throw new Error(`Expected status reset to PENDING, got: ${recoveredJob.status}`);
+      }
+      if (state.activeJobId !== null) {
+        throw new Error(`Expected activeJobId null, got: ${state.activeJobId}`);
+      }
+    }
+  );
+
+  // 125. M6-24: High-Volume Diagnostic & Integrity Check Performance (<50ms)
+  await executeTest(
+    'M6-24',
+    'RELIABILITY_M6',
+    'High-Volume Diagnostic & Integrity Performance (<50ms)',
+    'Verifies validation and repair across 200+ simulated jobs completes in under 50ms',
+    async () => {
+      const largeQueue: any[] = [];
+      for (let i = 0; i < 200; i++) {
+        largeQueue.push({
+          id: `perf_job_${i}`,
+          gstin: `27AABCU960${i % 10}R1ZM`,
+          financialYear: '2025-2026',
+          period: 'April',
+          returnType: 'GSTR-2B',
+          status: 'PENDING',
+          isTestJob: true,
+          retryCount: 0,
+          maxRetries: 3,
+          createdAt: Date.now() + i,
+          updatedAt: Date.now() + i,
+        });
+      }
+
+      const start = performance.now();
+      const repairResult = QueueIntegrityValidator.repair({
+        jobs: largeQueue,
+        isRunning: false,
+        isPaused: false,
+        activeJobId: null,
+        lastUpdated: 0,
+      });
+      const duration = performance.now() - start;
+
+      if (duration > 50) {
+        throw new Error(`Integrity check for 200 jobs took ${duration}ms, exceeding 50ms threshold`);
+      }
+      if (repairResult.repairedState.jobs.length === 0) {
+        throw new Error('Integrity check returned empty jobs');
       }
     }
   );

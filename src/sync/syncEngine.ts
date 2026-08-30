@@ -11,6 +11,8 @@ import { QueueStore } from '../queue/queueStore';
 import { ExtensionStorage } from '../storage/extensionStorage';
 import { Logger } from '../shared/logger';
 import { normalizeFinancialYear } from '../shared/utils';
+import { classifyError } from '../diagnostics/errorClassification';
+import { DiagnosticLogger } from '../diagnostics/diagnosticLogger';
 
 const STORAGE_KEY_SYNC_SETTINGS = 'udaan_gst_sync_settings';
 
@@ -274,11 +276,20 @@ export class SyncEngine {
         isDuplicate: false,
       };
     } catch (err: any) {
-      const errorMsg = err?.message || String(err);
-      Logger.warn(`[SyncEngine] Sync rejected for job ${job.id}: ${errorMsg}`);
+      const classified = classifyError(err, 'LOCAL_SYNC_FAILED', job.id);
+      const errorMsg = classified.userMessage;
+      Logger.warn(`[SyncEngine] Sync rejected for job ${job.id}: ${errorMsg} (${classified.code})`);
+      DiagnosticLogger.warn('SyncEngine', 'SYNC_REJECTED', `Sync failed for job ${job.id}: ${errorMsg}`, {
+        jobId: job.id,
+        errorCode: classified.code,
+        data: { originalError: String(err) },
+      });
       await QueueStore.updateJob(job.id, {
         syncStatus: 'SYNC_FAILED',
         syncError: errorMsg,
+        lastErrorCode: classified.code,
+        lastErrorMessage: errorMsg,
+        lastErrorAt: Date.now(),
       });
       return { success: false, error: errorMsg };
     }
