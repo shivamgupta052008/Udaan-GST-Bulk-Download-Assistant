@@ -247,7 +247,7 @@ export class SyncEngine {
       } else {
         // Real Production Job without actual downloaded content
         throw new Error(
-          'Actual GSTR-2B downloaded content is unavailable. Real GST downloads cannot be synchronized without the original file content.'
+          `Actual ${job.returnType} downloaded content is unavailable. Real GST downloads cannot be synchronized without the original file content.`
         );
       }
 
@@ -275,7 +275,7 @@ export class SyncEngine {
       };
     } catch (err: any) {
       const errorMsg = err?.message || String(err);
-      Logger.error(`[SyncEngine] Sync failed for job ${job.id}: ${errorMsg}`);
+      Logger.warn(`[SyncEngine] Sync rejected for job ${job.id}: ${errorMsg}`);
       await QueueStore.updateJob(job.id, {
         syncStatus: 'SYNC_FAILED',
         syncError: errorMsg,
